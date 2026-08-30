@@ -21,12 +21,12 @@ scripts/bundle/work/
 .env
 *.env.local
 
-# Nomad local data (worlds, snapshots, runtime, state)
-.nomad/
-data/
-worlds/
-storage/
-runtime/
+# Nomad local data (worlds, snapshots, runtime, state) — created next to the app at runtime
+/.nomad/
+/data/
+/worlds/
+/storage/
+/runtime/
 
 # AI tooling (never commit)
 .commandcode/
