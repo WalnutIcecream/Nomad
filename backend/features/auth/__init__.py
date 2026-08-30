@@ -1,0 +1,1 @@
+"""Interface package for the auth feature (no public API)."""

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Bundle build caches (downloads: PostgreSQL binaries, Temurin JRE)
+scripts/bundle/.cache/
+scripts/bundle/work/
+
+# Environment
+.env
+*.env.local
+
+# Nomad local data (worlds, snapshots, runtime, state)
+.nomad/
+data/
+worlds/
+storage/
+runtime/
+
+# AI tooling (never commit)
+.commandcode/
+.promptless-session
+.opencode/
+.claude/

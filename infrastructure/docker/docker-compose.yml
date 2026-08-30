@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nomad
+      POSTGRES_PASSWORD: nomad_dev
+      POSTGRES_DB: nomad
+    ports:
+      - "5432:5432"
+    volumes:
+      - nomad_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nomad -d nomad"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  nomad_postgres_data:
