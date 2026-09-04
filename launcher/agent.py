@@ -1,236 +1,216 @@
+"""The R2 host lifecycle: lease -> pull -> boot -> renew -> push -> release.
+
+This is the whole "first player to press Play becomes the host" flow:
+
+1. Acquire the lease in R2 (atomic conditional write). If someone else holds an
+   active lease, bail with HOST_EXISTS and the UI offers Join.
+2. Pull the latest ``world.tar.gz`` and extract it into the run directory.
+3. Install/validate the vanilla server jar and boot it from that directory.
+4. Renew the lease on a heartbeat thread for as long as the server runs.
+5. On stop: shut the server down (world flushed), tar the world directory,
+   upload it as the new shared version, then release the lease — only after the
+   upload lands, so the next host can never acquire a half-updated world.
+"""
+
 from __future__ import annotations
 
 import logging
+import shutil
+import tarfile
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import UUID
 
-from shared.protocol.enums import LauncherState
-
-from launcher.controller import ControllerClient, ControllerError
+from launcher.cloud import CloudError, Lease, LeaseError, WorldStore
 from launcher.minecraft.vanilla import VanillaMinecraftRuntime
-from launcher.state.machine import LauncherStateMachine
-from launcher.stopfile import StopFileWatcher
-from launcher.sync.snapshot import pull_latest_world, push_world_snapshot
+from launcher.sync.worldfolder import ensure_world_level
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class HostSession:
-    """Everything the host agent needs while it is hosting a world."""
-
-    world_id: UUID
-    lease_id: UUID
-    base_version: int
-    world_dir: Path
-    heartbeat_interval: float = 20.0
-    stop_event: threading.Event = field(default_factory=threading.Event)
-    heartbeat_error: Exception | None = None
-    _heartbeat_thread: threading.Thread | None = None
-
-    def start_heartbeats(self, client: ControllerClient) -> None:
-        def run() -> None:
-            while not self.stop_event.is_set():
-                self.stop_event.wait(self.heartbeat_interval)
-                if self.stop_event.is_set():
-                    break
-                try:
-                    client.heartbeat(self.world_id, self.lease_id)
-                    logger.debug("heartbeat ok")
-                except ControllerError as exc:
-                    logger.warning("heartbeat rejected: %s", exc)
-                    self.heartbeat_error = exc
-                    return
-
-        self._heartbeat_thread = threading.Thread(target=run, daemon=True)
-        self._heartbeat_thread.start()
-
-    def stop_heartbeats(self) -> None:
-        self.stop_event.set()
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=5)
-
-
 class HostAgent:
-    """Drives the launcher through the full host lifecycle against the controller.
-
-    States: CHECK_WORLD -> ACQUIRE_HOST -> DOWNLOAD -> VALIDATE -> START_SERVER
-    -> HOSTING (heartbeats) -> STOPPING -> SNAPSHOTTING -> UPLOADING ->
-    RELEASE_LEASE -> IDLE. Any failure moves to ERROR/RECOVER without ever
-    touching the cloud's last known-good version.
-    """
-
     def __init__(
         self,
         settings,
-        machine: LauncherStateMachine,
-        client: ControllerClient,
-        world_id: UUID,
-        runtime: VanillaMinecraftRuntime,
+        store: WorldStore,
+        world: dict,
+        runtime: VanillaMinecraftRuntime | None = None,
     ) -> None:
         self.settings = settings
-        self.machine = machine
-        self.client = client
-        self.world_id = world_id
-        self.runtime = runtime
-        self.world_dir = settings.worlds_dir / str(world_id)
-        self.session: HostSession | None = None
+        self.store = store
+        self.world = world
+        self.runtime = runtime or VanillaMinecraftRuntime()
+
+        self.world_id = str(world["id"])
+        self.run_dir = self.settings.worlds_dir / self.world_id
+        self.lease: Lease | None = None
         self.stop_requested = threading.Event()
-        self.stop_watcher = StopFileWatcher(self.world_dir)
+        self._renew_error: Exception | None = None
+        self._renew_thread: threading.Thread | None = None
+        self._released = False
 
     # --- entry ----------------------------------------------------------
 
     def host(self) -> int:
-        # Restart-safe: a previous crash may have left the machine mid-flow.
-        # Starting a fresh session always begins from the top.
-        self.machine.start_at(LauncherState.CHECK_AUTH)
-        self.machine.transition(LauncherState.CHECK_WORLD)
-        self.machine.transition(LauncherState.ACQUIRE_HOST)
-        # acquire is atomic on the controller; the world's status is only a hint.
-        acquired = self.client.acquire_host(self.world_id)
-        if not acquired.get("acquired"):
-            current = acquired.get("current_host_name") or acquired.get("current_host")
-            logger.info("host already exists: %s", current)
-            self.machine.transition(LauncherState.HOST_EXISTS)
+        """Run the full host session. Returns 0 on clean stop, 1 on failure."""
+        minecraft_version = self.world.get("minecraft_version") or self.settings.minecraft_version
+
+        # 1. Lease.
+        logger.info("acquiring host lease for %s…", self.world.get("name"))
+        try:
+            self.lease = self.store.acquire(
+                self.world_id, address=self.settings.public_address or None
+            )
+        except LeaseError as exc:
+            logger.info("host already exists: %s", exc.detail)
             return 1
-
-        lease_id = UUID(acquired["lease_id"])
-        self.machine.update_context(world_id=str(self.world_id), lease_id=str(lease_id))
-        logger.info("acquired host lease %s", lease_id)
-
-        self.machine.transition(LauncherState.DOWNLOAD)
-        base_version = pull_latest_world(self.client, self.world_id, self.world_dir)
-        self.machine.update_context(base_version=base_version)
-
-        self.machine.transition(LauncherState.VALIDATE)
-        jar_path = self.runtime.install(self.settings.minecraft_version, self.settings.install_dir)
-        ok, reason = self.runtime.validate(self.settings.install_dir, self.settings.java_path)
-        if not ok:
-            logger.error("server validation failed: %s", reason)
-            self.machine.transition(LauncherState.ERROR)
+        except CloudError as exc:
+            logger.error("could not reach world storage: %s", exc.detail)
             return 1
-
-        self.machine.transition(LauncherState.START_SERVER)
-        self.machine.update_context(local_world_dir=str(self.world_dir))
-        handle = self.runtime.start(
-            self.settings.install_dir,
-            self.world_dir,
-            self.settings.server_properties(),
-            self.settings.java_path,
-            self.settings.memory,
-        )
-
-        self.session = HostSession(
-            world_id=self.world_id,
-            lease_id=lease_id,
-            base_version=base_version,
-            world_dir=self.world_dir,
-            heartbeat_interval=self.settings.heartbeat_interval_seconds,
-        )
-        self.machine.transition(LauncherState.HOSTING)
-        self.session.start_heartbeats(self.client)
-        self._publish_connection_info()
-        self.stop_watcher.start()
-        logger.info("hosting world %s (base v%d)", self.world_id, base_version)
+        logger.info("lease acquired (holder=%s)", self.lease.holder)
 
         try:
-            while (
-                handle.is_running()
-                and self.session.heartbeat_error is None
-                and not self.stop_requested.is_set()
-                and not self.stop_watcher.stop_event.is_set()
-            ):
-                time.sleep(0.5)
-            if self.session.heartbeat_error is not None:
-                logger.error("lease lost: %s", self.session.heartbeat_error)
-                self.machine.transition(LauncherState.RECOVER)
+            # 2. Pull the latest shared world. The archive lives next to the
+            # run dir (not inside it) because extraction clears the run dir.
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            archive = self.run_dir.parent / f"{self.world_id}.tar.gz"
+            if self.store.download_world(self.world_id, archive):
+                self._extract(archive, self.run_dir)
+                archive.unlink(missing_ok=True)
+            else:
+                logger.info("no shared world yet — starting fresh")
+            ensure_world_level(self.run_dir)
+
+            # 3. Install + validate the server.
+            self.runtime.install(minecraft_version, self.settings.install_dir)
+            ok, reason = self.runtime.validate(self.settings.install_dir, self.settings.java_path)
+            if not ok:
+                logger.error("server validation failed: %s", reason)
                 return 1
-            if not handle.is_running():
-                logger.warning("server process exited unexpectedly")
-                self.machine.transition(LauncherState.RECOVER)
-                return 1
-            if self.stop_requested.is_set() or self.stop_watcher.stop_event.is_set():
-                logger.info("stop requested")
-        finally:
-            self.session.stop_heartbeats()
-            self.stop_watcher.cleanup()
 
-        self._shutdown(handle)
-        return 0
+            # 4. Boot.
+            handle = self.runtime.start(
+                self.settings.install_dir,
+                self.run_dir,
+                self.settings.server_properties(),
+                self.settings.java_path,
+                self.settings.memory,
+            )
 
-    # --- connection info --------------------------------------------------
+            # 5. Renew the lease while running.
+            self._start_renewer()
+            logger.info("hosting %s from %s", self.world.get("name"), self.run_dir)
 
-    def _publish_connection_info(self) -> None:
-        """Report how players can reach the local server.
-
-        Tries direct first (LAN/port-forwarded address). If the relay is
-        enabled, attach outbound and fall back to the relay token.
-        """
-        from launcher.networking import attach_relay, build_direct_info
-
-        info = build_direct_info(self.settings.server_port)
-        if info is not None and not self.settings.relay_enabled:
-            logger.info("publishing direct connection %s", info.address)
-            self.client.update_connection(self.world_id, info.to_dict())
-            return
-
-        if self.settings.relay_enabled:
             try:
-                token = attach_relay(self.settings.relay_host, self.settings.relay_port, self.settings.server_port)
-                self.client.update_connection(
-                    self.world_id,
-                    {
-                        "mode": "relay",
-                        "relay_token": token,
-                        "relay_host": self.settings.relay_host,
-                        "relay_port": self.settings.relay_port,
-                    },
-                )
-                logger.info("publishing relay connection token=%s", token[:12])
-                return
-            except Exception as exc:
-                logger.error("relay attachment failed: %s", exc)
+                while not self.stop_requested.is_set():
+                    if self._renew_error is not None:
+                        logger.error("lease lost: %s", self._renew_error)
+                        self._stop_server(handle)
+                        return 1
+                    if not handle.is_running():
+                        logger.warning("server process exited unexpectedly")
+                        self._stop_server(handle)
+                        return 1
+                    time.sleep(0.5)
+            finally:
+                self._stop_renewer()
+                if handle.is_running():
+                    self._stop_server(handle)
 
-        # No direct info and no relay: publish direct anyway so status shows
-        # something, or fall back to whatever we can.
-        if info is not None:
-            self.client.update_connection(self.world_id, info.to_dict())
+            # 6. Push + release.
+            self._upload_and_release()
+            return 0
+        finally:
+            # On any error/early-return path the lease must not stay held
+            # forever. Release now if we still hold it (expiry frees it if the
+            # release itself fails).
+            if self.lease is not None and not self._released:
+                try:
+                    self.store.release(self.world_id, self.lease)
+                except Exception:
+                    logger.warning("could not release lease (expiry will free it)")
 
-    # --- shutdown path ---------------------------------------------------
+    # --- server control -------------------------------------------------
 
-    def _shutdown(self, handle) -> None:
-        self.machine.transition(LauncherState.STOPPING)
-        logger.info("sending graceful stop to server")
-        self.runtime.stop(handle)
+    def _stop_server(self, handle) -> None:
+        logger.info("stopping server…")
         try:
+            self.runtime.stop(handle)
             handle.wait(timeout=self.settings.stop_timeout_seconds)
             logger.info("server stopped cleanly")
         except Exception:
-            logger.error("server did not stop within timeout")
-            self.machine.transition(LauncherState.ERROR)
-            return
+            logger.warning("server did not stop cleanly within timeout")
 
-        assert self.session is not None
-        self.machine.transition(LauncherState.SNAPSHOTTING)
-        self.machine.transition(LauncherState.UPLOADING)
+    def _start_renewer(self) -> None:
+        interval = self.settings.heartbeat_interval_seconds
+
+        def renew() -> None:
+            while not self.stop_requested.is_set():
+                self.stop_requested.wait(interval)
+                if self.stop_requested.is_set():
+                    break
+                try:
+                    assert self.lease is not None
+                    self.lease = self.store.renew(self.world_id, self.lease)
+                    logger.debug("lease renewed until %s", self.lease.expires_at)
+                except Exception as exc:
+                    self._renew_error = exc
+                    return
+
+        self._renew_thread = threading.Thread(target=renew, daemon=True)
+        self._renew_thread.start()
+
+    def _stop_renewer(self) -> None:
+        self.stop_requested.set()
+        if self._renew_thread is not None:
+            self._renew_thread.join(timeout=10)
+
+    # --- world upload ----------------------------------------------------
+
+    def _upload_and_release(self) -> None:
+        assert self.lease is not None
+        # The world the server wrote must become the shared world. Use the
+        # level dir (run_dir/world after ensure_world_level).
+        source = self.run_dir / "world"
+        if not source.is_dir():
+            source = self.run_dir
+        archive = self.run_dir / "upload.tar.gz"
         try:
-            push_world_snapshot(
-                self.client,
-                self.world_id,
-                self.session.lease_id,
-                self.world_dir,
-                self.session.base_version,
-                self.settings.minecraft_version,
-            )
-        except ControllerError as exc:
-            logger.error("snapshot upload rejected: %s", exc)
-            self.machine.transition(LauncherState.ERROR)
-            return
+            with tarfile.open(archive, "w:gz") as tar:
+                tar.add(source, arcname=".")
+            logger.info("uploading world (%d bytes)…", archive.stat().st_size)
+            self.store.upload_world(self.world_id, archive)
+            logger.info("world uploaded")
+        finally:
+            archive.unlink(missing_ok=True)
 
-        self.machine.transition(LauncherState.RELEASE_LEASE)
-        self.client.release_host(self.world_id, self.session.lease_id)
-        self.machine.transition(LauncherState.IDLE)
-        logger.info("host session complete; world returned to sleep")
+        try:
+            self.store.release(self.world_id, self.lease)
+            self._released = True
+            logger.info("lease released — world is ready for the next host")
+        except Exception as exc:
+            logger.warning("could not release lease cleanly: %s", exc)
+
+    # --- helpers ---------------------------------------------------------
+
+    @staticmethod
+    def _extract(archive: Path, dest: Path) -> None:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive, "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.issym() or member.islnk():
+                    continue
+                target = (dest / member.name).resolve()
+                if not str(target).startswith(str(dest.resolve())):
+                    raise RuntimeError(f"unsafe archive member: {member.name}")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    src = tar.extractfile(member)
+                    if src is None:
+                        continue
+                    with src, open(target, "wb") as out:
+                        shutil.copyfileobj(src, out)

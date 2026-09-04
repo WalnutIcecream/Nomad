@@ -1,17 +1,21 @@
+"""The PySide6 launcher window for the R2-backed design.
+
+No accounts, no login page: the window lists the worlds this machine knows
+about (from the local registry), with PLAY/STOP driving the host agent and JOIN
+showing the host's published address from the lease. R2 credentials are
+configured once (first-run dialog or R2 Settings).
+"""
+
 from __future__ import annotations
 
 import logging
 import threading
-from uuid import UUID
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -19,130 +23,89 @@ from PySide6.QtWidgets import (
 )
 
 from launcher.agent import HostAgent
+from launcher.cloud import S3Client, WorldStore
 from launcher.config import LauncherSettings
-from launcher.controller import ControllerClient, ControllerError
-from launcher.minecraft.vanilla import VanillaMinecraftRuntime
-from launcher.state.machine import LauncherStateMachine
-from launcher.state.persist import StateStore
+from launcher.registry import WorldRegistry
+from launcher.ui.connection_dialog import ConnectionDialog
+from launcher.ui.settings_dialog import SettingsDialog
 from launcher.ui.widgets import WorldCard
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL_MS = 5000
+POLL_INTERVAL_MS = 3000
 
 
-class MainWindow(QMainWindow):
-    worlds_updated = Signal(list)
+def build_store(settings: LauncherSettings) -> WorldStore | None:
+    """Construct the R2 client + store from settings, or None if unconfigured."""
+    if not (
+        settings.r2_account_id
+        and settings.r2_access_key
+        and settings.r2_secret_key
+        and settings.r2_bucket
+    ):
+        return None
+    client = S3Client(
+        settings.endpoint_url,
+        settings.r2_access_key,
+        settings.r2_secret_key,
+        settings.r2_bucket,
+    )
+    return WorldStore(client, player_name=settings.player_name)
+
+
+class MainWindow(QWidget):
+    """The launcher: worlds list + play/stop/join against the R2 world store."""
+
+    worlds_changed = Signal()
     status_message = Signal(str)
 
-    def __init__(self, settings: LauncherSettings) -> None:
+    def __init__(self, settings: LauncherSettings, prompt_settings: bool = True) -> None:
         super().__init__()
         self.settings = settings
-        self.client: ControllerClient | None = None
-        self.cards: dict[str, WorldCard] = {}
-        self.active_hosting: dict[str, threading.Thread] = {}
+        self.registry = WorldRegistry(settings.registry_file)
+        self.store = build_store(settings)
+        self.active_agents: dict[str, HostAgent] = {}
+        self.hosting_states: dict[str, str] = {}  # world_id -> "starting"|"hosting"
 
-        self.setWindowTitle("Nomad — World Launcher")
-        self.resize(560, 480)
+        self.setWindowTitle("Nomad")
         self.setStyleSheet(
-            "QMainWindow { background: #14161f; }"
             "QWidget { background: transparent; color: #e8eaf0; }"
             "QPushButton { background: #2b3043; border: 1px solid #3a4060; "
             "border-radius: 6px; padding: 8px 14px; }"
             "QPushButton:hover { background: #363c55; }"
-            "QLineEdit { color: #e8eaf0; }"
         )
 
-        self.active_agents: dict[UUID, object] = {}
-        self.worlds_updated.connect(self._render_worlds)
+        self.worlds_changed.connect(self._reload)
         self.status_message.connect(self._show_status)
+        self._build_ui()
+        self._reload()
 
-        self._build_login()
-        self._start_poller()
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self._refresh_statuses)
+        self._poll.start(POLL_INTERVAL_MS)
 
-    # --- login view ------------------------------------------------------
+        if self.store is None and prompt_settings:
+            # First-run (or missing R2 config): show the settings dialog
+            # non-modally so the app still opens; save applies on accept.
+            self._settings_dialog: QDialog | None = None
+            QTimer.singleShot(0, self._open_settings_nonmodal)
 
-    def _build_login(self) -> None:
-        self.login_widget = QWidget()
-        layout = QVBoxLayout(self.login_widget)
-        layout.setContentsMargins(40, 80, 40, 40)
-        layout.setSpacing(12)
+    # --- UI -------------------------------------------------------------
 
-        title = QLabel("Nomad")
-        title.setStyleSheet("font-size: 28px; font-weight: 700; color: #e8eaf0;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        subtitle = QLabel("Your worlds, wherever you are.")
-        subtitle.setStyleSheet("color: #9aa1b5;")
-        subtitle.setAlignment(Qt.AlignCenter)
-        layout.addWidget(subtitle)
-        layout.addSpacing(24)
-
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Username")
-        self.username_input.setStyleSheet("padding: 8px; border-radius: 6px; background: #232738;")
-        layout.addWidget(self.username_input)
-
-        self.password_input = QLineEdit()
-        self.password_input.setPlaceholderText("Password")
-        self.password_input.setEchoMode(QLineEdit.Password)
-        self.password_input.setStyleSheet("padding: 8px; border-radius: 6px; background: #232738;")
-        layout.addWidget(self.password_input)
-
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #f26d6d;")
-        self.error_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.error_label)
-
-        buttons = QHBoxLayout()
-        self.register_button = QPushButton("Register")
-        self.register_button.clicked.connect(lambda: self._authenticate(register=True))
-        self.login_button = QPushButton("Login")
-        self.login_button.clicked.connect(lambda: self._authenticate(register=False))
-        buttons.addWidget(self.register_button)
-        buttons.addWidget(self.login_button)
-        layout.addLayout(buttons)
-        layout.addStretch()
-
-        self.setCentralWidget(self.login_widget)
-
-    def _authenticate(self, register: bool) -> None:
-        username = self.username_input.text().strip()
-        password = self.password_input.text()
-        if not username or not password:
-            self.error_label.setText("Enter a username and password.")
-            return
-        if self.settings.controller_token:
-            self.error_label.setText("Already logged in.")
-            return
-
-        def work() -> None:
-            try:
-                from launcher.ui.auth import login
-
-                token = login(self.settings, username, password, register=register)
-                self.client = ControllerClient(self.settings.controller_url, token)
-                self.status_message.emit("")
-                self._show_worlds_view()
-            except Exception as exc:
-                self.status_message.emit(str(exc))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    # --- worlds view -----------------------------------------------------
-
-    def _show_worlds_view(self) -> None:
-        self.worlds_widget = QWidget()
-        root = QVBoxLayout(self.worlds_widget)
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
 
         header = QHBoxLayout()
         title = QLabel("MY WORLDS")
-        title.setStyleSheet("font-size: 18px; font-weight: 700; color: #e8eaf0;")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
         header.addWidget(title)
         header.addStretch()
+
+        settings_button = QPushButton("R2 Settings…")
+        settings_button.clicked.connect(self._prompt_settings)
+        header.addWidget(settings_button)
 
         new_world_button = QPushButton("New World")
         new_world_button.clicked.connect(self._on_new_world)
@@ -163,138 +126,157 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.cards_container)
         root.addWidget(scroll, stretch=1)
 
-        self.setCentralWidget(self.worlds_widget)
-        self._refresh_worlds()
+    def _clear_cards(self) -> None:
+        while self.cards_layout.count() > 1:
+            item = self.cards_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
 
-    def _refresh_worlds(self) -> None:
-        if self.client is None:
-            return
-        try:
-            worlds = self.client.list_worlds()
-            self.worlds_updated.emit(worlds)
-        except Exception as exc:
-            self.status_label.setText(f"Refresh failed: {exc}")
-
-    def _render_worlds(self, worlds: list[dict]) -> None:
-        for card in list(self.cards.values()):
-            if card.world.get("id") not in [w.get("id") for w in worlds]:
-                self.cards_layout.removeWidget(card)
-                card.deleteLater()
-                del self.cards[card.world["id"]]
-
+    def _reload(self) -> None:
+        self._clear_cards()
+        worlds = self.registry.list_worlds()
         for world in worlds:
-            world_id = world["id"]
-            card = self.cards.get(world_id)
-            if card is None:
-                card = WorldCard(
-                    world,
-                    self.settings,
-                    on_play=self._on_play,
-                    on_join=self._on_join,
-                    on_stop=self._on_stop,
-                )
-                self.cards[world_id] = card
-                self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
-            else:
-                card.am_host = world_id in self.active_hosting
-                card.refresh(world)
-
+            card = WorldCard(
+                world,
+                self.settings,
+                on_play=self._on_play,
+                on_join=self._on_join,
+                on_stop=self._on_stop,
+                on_settings=self._on_world_settings,
+                status=self.hosting_states.get(world["id"], "sleeping"),
+                is_host=world["id"] in self.active_agents,
+            )
+            self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
         if not worlds:
-            self.status_label.setText("No worlds yet. Create one with the CLI.")
+            self.status_label.setText("No worlds yet. Click New World.")
 
-    def _start_poller(self) -> None:
-        timer = QTimer(self)
-        timer.timeout.connect(self._refresh_worlds)
-        timer.start(POLL_INTERVAL_MS)
+    def _refresh_statuses(self) -> None:
+        """Poll the lease for every world and update the cards."""
+        if self.store is None:
+            return
+        for i in range(self.cards_layout.count()):
+            item = self.cards_layout.itemAt(i)
+            card = item.widget() if item else None
+            if not isinstance(card, WorldCard):
+                continue
+            world_id = card.world["id"]
+            if world_id in self.active_agents:
+                card.set_hosting_state(self.hosting_states.get(world_id, "hosting"), is_host=True)
+                continue
+            try:
+                status = self.store.status(world_id)
+                if status.get("hosted"):
+                    card.set_hosting_state("hosting", is_host=False, holder=status.get("holder"))
+                else:
+                    card.set_hosting_state("sleeping")
+            except Exception:
+                card.set_hosting_state("unknown")
 
     # --- actions ---------------------------------------------------------
 
     def _on_new_world(self) -> None:
-        if self.client is None:
-            return
         name, ok = QInputDialog.getText(self, "New World", "World name:")
         if not ok or not name.strip():
             return
         version, vok = QInputDialog.getText(
-            self,
-            "New World",
-            "Minecraft version:",
-            text=self.settings.minecraft_version,
+            self, "New World", "Minecraft version:", text=self.settings.minecraft_version
         )
         if not vok or not version.strip():
             return
-
-        def work() -> None:
-            try:
-                self.client.create_world(name.strip(), version.strip())
-                self._refresh_worlds()
-            except Exception as exc:
-                self.status_message.emit(f"Could not create world: {exc}")
-
-        threading.Thread(target=work, daemon=True).start()
+        world = self.registry.add(name.strip(), version.strip())
+        self.status_message.emit(f"Created '{world['name']}'. Press PLAY to start it.")
+        self.worlds_changed.emit()
 
     def _on_play(self, world: dict) -> None:
-        if self.client is None:
+        if self.store is None:
+            self._prompt_settings()
             return
-        world_id = UUID(world["id"])
-        if world_id in self.active_hosting:
+        world_id = world["id"]
+        if world_id in self.active_agents:
             return
+        self.hosting_states[world_id] = "starting"
         self.status_message.emit(f"Starting {world['name']}…")
+        self.worlds_changed.emit()
 
         def work() -> None:
-            machine = LauncherStateMachine(StateStore(self.settings.state_file))
-            agent = HostAgent(
-                self.settings,
-                machine,
-                self.client,
-                world_id,
-                VanillaMinecraftRuntime(),
-            )
+            agent = HostAgent(self.settings, self.store, world)
             self.active_agents[world_id] = agent
+            self.hosting_states[world_id] = "hosting"
+            self.worlds_changed.emit()
             try:
                 code = agent.host()
                 if code == 0:
-                    self.status_message.emit(f"{world['name']} stopped and saved.")
+                    self.status_message.emit(f"{world['name']} stopped and saved to the cloud.")
                 else:
-                    self.status_message.emit(f"{world['name']}: could not host (see logs).")
+                    self.status_message.emit(
+                        f"{world['name']}: couldn't host — is someone else hosting it?"
+                    )
             except Exception as exc:
                 self.status_message.emit(f"Hosting failed: {exc}")
             finally:
-                self.active_hosting.pop(world_id, None)
                 self.active_agents.pop(world_id, None)
-                self._refresh_worlds()
+                self.hosting_states.pop(world_id, None)
+                self.worlds_changed.emit()
 
-        thread = threading.Thread(target=work, daemon=True)
-        self.active_hosting[world_id] = thread
-        thread.start()
-
-    def _on_join(self, world: dict) -> None:
-        if self.client is None:
-            return
-        try:
-            connection = world.get("connection") or {}
-            if connection.get("mode") == "relay" and connection.get("relay_token"):
-                target = (
-                    f"Relay {connection.get('relay_host')}:{connection.get('relay_port')} "
-                    f"(token {connection.get('relay_token')[:12]}…)"
-                )
-            else:
-                target = connection.get("address") or "unknown"
-            self.status_message.emit(
-                f"Joining {world['name']}: connect your Minecraft client to {target}."
-            )
-        except Exception as exc:
-            self.status_message.emit(f"Join failed: {exc}")
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_stop(self, world: dict) -> None:
-        world_id = UUID(world["id"])
-        agent = self.active_agents.get(world_id)
+        agent = self.active_agents.get(world["id"])
         if agent is not None:
             agent.stop_requested.set()
             self.status_message.emit("Stopping server gracefully…")
 
-    def _show_status(self, message: str) -> None:
-        if hasattr(self, "status_label"):
-            self.status_label.setText(message)
+    def _on_join(self, world: dict) -> None:
+        if self.store is None:
+            self._prompt_settings()
+            return
+        try:
+            status = self.store.status(world["id"])
+        except Exception as exc:
+            self.status_message.emit(f"Could not reach world storage: {exc}")
+            return
+        if not status.get("hosted"):
+            self.status_message.emit(f"'{world['name']}' isn't hosted right now.")
+            return
+        if status.get("address"):
+            dialog = ConnectionDialog(world, direct_address=status["address"])
+            dialog.exec()
         else:
-            self.error_label.setText(message)
+            self.status_message.emit(
+                f"'{world['name']}' is hosted by {status.get('holder')}, "
+                "but no address has been published yet."
+            )
+
+    def _on_world_settings(self, world: dict) -> None:
+        dialog = SettingsDialog(self.settings, world)
+        dialog.exec()
+        self.worlds_changed.emit()
+
+    def _open_settings_nonmodal(self) -> None:
+        """Show the R2 settings dialog without blocking the main window."""
+        dialog = SettingsDialog(self.settings, None, parent=self)
+        dialog.accepted.connect(self._on_settings_accepted)
+        dialog.rejected.connect(self._on_settings_rejected)
+        self._settings_dialog = dialog
+        dialog.show()
+
+    def _on_settings_accepted(self) -> None:
+        self.store = build_store(self.settings)
+        self.worlds_changed.emit()
+        self._refresh_statuses()
+
+    def _on_settings_rejected(self) -> None:
+        # User skipped configuration; the app remains usable read-only.
+        self.store = build_store(self.settings)
+        self._refresh_statuses()
+
+    def _prompt_settings(self) -> None:
+        """Blocking settings dialog (used from the R2 Settings button)."""
+        dialog = SettingsDialog(self.settings, None, parent=self)
+        dialog.exec()
+        self.store = build_store(self.settings)
+        self.worlds_changed.emit()
+        self._refresh_statuses()
+
+    def _show_status(self, message: str) -> None:
+        self.status_label.setText(message)

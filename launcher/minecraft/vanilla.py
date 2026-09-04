@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterator
 from urllib.request import urlopen
 
-from shared.protocol.models import ServerProperties
+from launcher.server_properties import ServerProperties
 
 from launcher.minecraft.process import ProcessHandle
 

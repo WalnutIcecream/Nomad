@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator, Protocol
 
-from shared.protocol.models import ServerProperties
+from launcher.server_properties import ServerProperties
 
 from launcher.minecraft.process import ProcessHandle
 

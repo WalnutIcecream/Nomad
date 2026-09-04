@@ -1,364 +1,215 @@
+"""CLI for the R2-backed Nomad launcher.
+
+Commands:
+    nomad config                 show R2 settings status
+    nomad worlds                 list worlds in the local registry
+    nomad new <name>             create a world in the local registry
+    nomad join <world-id>        add a friend's world by id
+    nomad play <world-id>        host a world (lease -> pull -> boot -> push)
+    nomad status <world-id>      show who hosts a world right now
+"""
+
 from __future__ import annotations
 
 import argparse
 import logging
-import os
-import signal
 import sys
-from pathlib import Path
-from uuid import UUID
 
-from shared.protocol.enums import LauncherState
-from shared.protocol.models import ServerProperties
-
-from launcher.config import LauncherSettings
-from launcher.minecraft.process import ProcessHandle
-from launcher.minecraft.vanilla import VanillaMinecraftRuntime
-from launcher.state.machine import LauncherStateMachine
-from launcher.state.persist import StateStore
-from launcher.sync.snapshot import create_snapshot, restore_snapshot
-from launcher.storage import build_storage
-from launcher.storage.base import WorldStorage
-from launcher.stopfile import StopFileWatcher
-
-logger = logging.getLogger(__name__)
-
-WORLD_UUID = UUID("00000000-0000-0000-0000-000000000001")
-
-PID_FILE_NAME = "nomad.pid"
+from launcher.config import LauncherSettings, load_settings_file
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="nomad")
+    parser = argparse.ArgumentParser(prog="nomad", description="Distributed Minecraft hosting via R2")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    play = subparsers.add_parser("play", help="install, start, and host a Minecraft server")
-    play.add_argument("--world-dir", type=Path, help="world directory (default: <data>/worlds/world)")
+    subparsers.add_parser("config", help="show current R2 settings")
+
+    subparsers.add_parser("worlds", help="list worlds in the local registry")
+
+    new = subparsers.add_parser("new", help="create a world in the local registry")
+    new.add_argument("name", help="world name")
+    new.add_argument("--version", default=None, help="Minecraft version (default: launcher default)")
+
+    join = subparsers.add_parser("join", help="add a friend's world by its id")
+    join.add_argument("world_id", help="world id (a UUID)")
+    join.add_argument("--name", default=None, help="display name")
+
+    play = subparsers.add_parser("play", help="host a world until stopped (Ctrl-C to stop)")
+    play.add_argument("world_id", help="world id")
     play.add_argument("--accept-eula", action="store_true", help="agree to the Minecraft EULA")
 
-    stop = subparsers.add_parser("stop", help="gracefully stop a running server")
-    stop.add_argument("--world-dir", type=Path)
-    stop.add_argument("--world", type=UUID, help="controller world id (stops the agent hosting it)")
-
-    subparsers.add_parser("status", help="show current launcher state")
-
-    snap = subparsers.add_parser("snapshot", help="snapshot management")
-    snap_sub = snap.add_subparsers(dest="snap_command", required=True)
-
-    snap_create = snap_sub.add_parser("create", help="create a new snapshot")
-    snap_create.add_argument("--world-dir", type=Path)
-
-    snap_sub.add_parser("list", help="list stored snapshots")
-
-    snap_restore = snap_sub.add_parser("restore", help="restore a snapshot")
-    snap_restore.add_argument("--version", type=int, required=True)
-    snap_restore.add_argument("--world-dir", type=Path)
-
-    host = subparsers.add_parser("host", help="host a world from the controller (Stage 5)")
-    host.add_argument("--world", type=UUID, required=True, help="world id")
-    host.add_argument("--accept-eula", action="store_true", help="agree to the Minecraft EULA")
-
-    worlds = subparsers.add_parser("worlds", help="list worlds from the controller")
-
-    join = subparsers.add_parser("join", help="join an active host's server")
-    join.add_argument("--world", type=UUID, required=True, help="world id")
+    status = subparsers.add_parser("status", help="show who currently hosts a world")
+    status.add_argument("world_id", help="world id")
 
     return parser
+
+
+def _settings() -> LauncherSettings:
+    return load_settings_file(LauncherSettings())
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-
-    settings = LauncherSettings()
-    store = StateStore(settings.state_file)
-    machine = LauncherStateMachine(store)
-    runtime = VanillaMinecraftRuntime()
-    world_dir = args.world_dir if getattr(args, "world_dir", None) else settings.worlds_dir / "world"
-
     try:
-        if args.command == "play":
-            return _play(settings, machine, runtime, world_dir, args)
-        if args.command == "stop":
-            if getattr(args, "world", None):
-                stop_world_dir = settings.worlds_dir / str(args.world)
-            else:
-                stop_world_dir = world_dir
-            return _stop(stop_world_dir)
-        if args.command == "status":
-            return _status(machine)
-        if args.command == "snapshot":
-            storage = build_storage(settings)
-            if args.snap_command == "create":
-                return _snapshot_create(settings, machine, storage, world_dir)
-            if args.snap_command == "list":
-                return _snapshot_list(storage)
-            if args.snap_command == "restore":
-                return _snapshot_restore(machine, storage, world_dir, args.version)
-        if args.command == "host":
-            return _host(settings, machine, runtime, args)
+        if args.command == "config":
+            return _config()
         if args.command == "worlds":
-            return _worlds(settings)
+            return _worlds()
+        if args.command == "new":
+            return _new(args)
         if args.command == "join":
-            return _join(settings, args)
+            return _join(args)
+        if args.command == "play":
+            return _play(args)
+        if args.command == "status":
+            return _status(args)
         parser.error("unknown command")
         return 2
     except KeyboardInterrupt:
-        logger.info("interrupted")
+        logging.getLogger(__name__).info("interrupted")
         return 1
     except Exception as exc:
-        logger.error("command failed: %s", exc)
+        logging.getLogger(__name__).error("command failed: %s", exc)
         return 1
 
 
-def _play(
-    settings: LauncherSettings,
-    machine: LauncherStateMachine,
-    runtime: VanillaMinecraftRuntime,
-    world_dir: Path,
-    args: argparse.Namespace,
-) -> int:
-    if not args.accept_eula and not settings.eula_accepted:
-        logger.error("Minecraft EULA not accepted. Pass --accept-eula or set NOMAD_EULA_ACCEPTED=true.")
-        return 1
-
-    world_dir.mkdir(parents=True, exist_ok=True)
-    _write_pid_file(world_dir)
-
-    try:
-        machine.start_at(LauncherState.CHECK_AUTH)
-        machine.transition(LauncherState.CHECK_WORLD)
-        machine.transition(LauncherState.ACQUIRE_HOST)
-        machine.transition(LauncherState.DOWNLOAD)
-
-        jar_path = runtime.install(settings.minecraft_version, settings.install_dir)
-        logger.info("server jar: %s", jar_path)
-        ok, reason = runtime.validate(settings.install_dir, settings.java_path)
-        if not ok:
-            machine.transition(LauncherState.ERROR)
-            logger.error("validation failed: %s", reason)
-            return 1
-
-        machine.transition(LauncherState.VALIDATE)
-        machine.transition(LauncherState.START_SERVER)
-
-        properties = ServerProperties()
-        handle = runtime.start(
-            settings.install_dir, world_dir, properties, settings.java_path, settings.memory
-        )
-        machine.update_context(world_id=str(WORLD_UUID), local_world_dir=str(world_dir))
-        machine.transition(LauncherState.HOSTING)
-
-        logger.info("server started; press Ctrl-C or run 'nomad stop' to stop")
-        watcher = StopFileWatcher(world_dir).start()
-        try:
-            for line in handle.tail_logs():
-                print(line, flush=True)
-                if watcher.stop_event.is_set():
-                    logger.info("stop requested via marker file")
-                    break
-                if not handle.is_running():
-                    logger.warning("server process exited unexpectedly")
-                    machine.transition(LauncherState.RECOVER)
-                    return 1
-        except KeyboardInterrupt:
-            logger.info("stop signal received")
-        finally:
-            watcher.cleanup()
-
-        _graceful_shutdown(machine, runtime, handle, settings.stop_timeout_seconds)
-        return 0
-    finally:
-        _remove_pid_file(world_dir)
-
-
-def _graceful_shutdown(
-    machine: LauncherStateMachine,
-    runtime: VanillaMinecraftRuntime,
-    handle: ProcessHandle,
-    stop_timeout_seconds: int,
-) -> None:
-    machine.transition(LauncherState.STOPPING)
-    logger.info("sending graceful stop to server")
-    runtime.stop(handle)
-    try:
-        handle.wait(timeout=stop_timeout_seconds)
-        logger.info("server stopped cleanly")
-    except Exception:
-        logger.error("server did not stop within timeout")
-        machine.transition(LauncherState.ERROR)
-        return
-    machine.transition(LauncherState.RELEASE_LEASE)
-    machine.transition(LauncherState.IDLE)
-
-
-def _stop(world_dir: Path) -> int:
-    """Request a graceful stop via the marker file, with a POSIX SIGINT
-    fallback for processes sharing this console."""
-    watcher = StopFileWatcher(world_dir)
-    watcher.request_stop()
-    logger.info("stop requested via marker file")
-
-    pid_file = world_dir / PID_FILE_NAME
-    if pid_file.exists() and os.name == "posix":
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
-            os.kill(pid, signal.SIGINT)
-            logger.info("also sent SIGINT to launcher pid %d", pid)
-        except ProcessLookupError:
-            logger.warning("stale pid file found; removing it")
-            _remove_pid_file(world_dir)
-        except (ValueError, OSError) as exc:
-            logger.warning("could not signal launcher: %s (marker file still works)", exc)
-    return 0
-
-
-def _status(machine: LauncherStateMachine) -> int:
-    context = machine.get_context()
-    print(f"State: {context['state']}")
-    print(f"World: {context.get('world_id') or '-'}")
-    print(f"Base version: {context.get('base_version') or '-'}")
-    return 0
-
-
-def _host(
-    settings: LauncherSettings,
-    machine: LauncherStateMachine,
-    runtime: VanillaMinecraftRuntime,
-    args: argparse.Namespace,
-) -> int:
-    if not args.accept_eula and not settings.eula_accepted:
-        logger.error("Minecraft EULA not accepted. Pass --accept-eula or set NOMAD_EULA_ACCEPTED=true.")
-        return 1
-    if not settings.controller_token:
-        logger.error("no controller token. Set NOMAD_CONTROLLER_TOKEN or login first.")
-        return 1
-
-    from launcher.agent import HostAgent
-    from launcher.controller import ControllerClient
-
-    client = ControllerClient(settings.controller_url, settings.controller_token)
-    try:
-        agent = HostAgent(settings, machine, client, args.world, runtime)
-        return agent.host()
-    finally:
-        client.close()
-
-
-def _worlds(settings: LauncherSettings) -> int:
-    if not settings.controller_token:
-        logger.error("no controller token. Set NOMAD_CONTROLLER_TOKEN or login first.")
-        return 1
-
-    from launcher.controller import ControllerClient
-
-    client = ControllerClient(settings.controller_url, settings.controller_token)
-    try:
-        worlds = client.list_worlds()
-        if not worlds:
-            print("No worlds.")
-            return 0
-        for world in worlds:
-            host = world.get("current_host_name") or world.get("current_host") or "-"
-            print(
-                f"{world['id']}  {world['name']:20s}  {world['status']:10s}  "
-                f"v{world.get('latest_version') or 0}  host={host}"
-            )
-        return 0
-    finally:
-        client.close()
-
-
-def _join(settings: LauncherSettings, args: argparse.Namespace) -> int:
-    if not settings.controller_token:
-        logger.error("no controller token. Set NOMAD_CONTROLLER_TOKEN or login first.")
-        return 1
-
-    from launcher.controller import ControllerClient
-    from launcher.networking import ConnectionInfo
-
-    client = ControllerClient(settings.controller_url, settings.controller_token)
-    try:
-        world = client.get_world(args.world)
-        if world.get("status") != "hosting":
-            print(f"World is not currently hosted (status: {world.get('status')}).")
-            return 1
-
-        info = ConnectionInfo.from_dict(world.get("connection"))
-        if info is None:
-            print("Host has not published connection info yet.")
-            return 1
-
-        if info.mode == "relay" and info.relay_token:
-            target = f"relay://{info.relay_host}:{info.relay_port} token={info.relay_token[:12]}..."
-            print(f"Join via relay: {target}")
-        else:
-            print(f"Join directly: {info.address or 'unknown address'}")
-        print(f"World: {world['name']}  Host: {world.get('current_host_name') or '-'}")
-
-        # For the MVP, `join` prints the connection target. Launching the
-        # Minecraft client and dialing the relay pipe is a GUI-era step.
-        return 0
-    finally:
-        client.close()
-
-
-def _snapshot_create(
-    settings: LauncherSettings,
-    machine: LauncherStateMachine,
-    storage: WorldStorage,
-    world_dir: Path,
-) -> int:
-    machine.start_at(LauncherState.SNAPSHOTTING)
-    latest = storage.get_latest_version()
-    metadata = create_snapshot(
-        storage,
-        world_dir,
-        settings.minecraft_version,
-        created_by=WORLD_UUID,
-        base_version=latest.version if latest else None,
+def _configured(settings: LauncherSettings) -> bool:
+    return bool(
+        settings.r2_account_id
+        and settings.r2_access_key
+        and settings.r2_secret_key
+        and settings.r2_bucket
     )
-    print(f"Created snapshot v{metadata.version} (sha {metadata.sha256[:12]})")
-    machine.transition(LauncherState.IDLE)
+
+
+def _store(settings: LauncherSettings):
+    from launcher.cloud import S3Client, WorldStore
+
+    return WorldStore(
+        S3Client(
+            settings.endpoint_url,
+            settings.r2_access_key,
+            settings.r2_secret_key,
+            settings.r2_bucket,
+        ),
+        player_name=settings.player_name,
+    )
+
+
+def _config() -> int:
+    settings = _settings()
+    configured = _configured(settings)
+    print(f"R2 configured: {'yes' if configured else 'no'}")
+    print(f"  account_id: {settings.r2_account_id or '-'}")
+    print(f"  bucket:     {settings.r2_bucket or '-'}")
+    print(f"  endpoint:   {settings.endpoint_url}")
+    print(f"  player:     {settings.player_name}")
+    print(f"  address:    {settings.public_address or '(not published)'}")
+    if not configured:
+        print()
+        print("Set NOMAD_R2_ACCOUNT_ID / NOMAD_R2_ACCESS_KEY / NOMAD_R2_SECRET_KEY /")
+        print("NOMAD_R2_BUCKET, or run the launcher GUI and fill in R2 Settings.")
     return 0
 
 
-def _snapshot_list(storage: WorldStorage) -> int:
-    versions = storage.list_versions()
-    if not versions:
-        print("No snapshots stored.")
+def _worlds() -> int:
+    from launcher.registry import WorldRegistry
+
+    settings = _settings()
+    registry = WorldRegistry(settings.registry_file)
+    store = _store(settings) if _configured(settings) else None
+
+    worlds = registry.list_worlds()
+    if not worlds:
+        print("No worlds in the registry. Create one with 'nomad new <name>'.")
         return 0
-    for metadata in versions:
-        sha = metadata.sha256[:12] if metadata.sha256 else "-"
+    for world in worlds:
+        hosted = ""
+        if store is not None:
+            try:
+                status = store.status(world["id"])
+                hosted = f"hosted by {status['holder']}" if status.get("hosted") else "sleeping"
+            except Exception:
+                hosted = "unreachable"
         print(
-            f"v{metadata.version}  {metadata.created_at.isoformat()}  "
-            f"mc={metadata.minecraft_version}  sha={sha}"
+            f"{world['id']}  {world['name']:24s} "
+            f"mc={world.get('minecraft_version', '?'):8s} {hosted}"
         )
     return 0
 
 
-def _snapshot_restore(
-    machine: LauncherStateMachine,
-    storage: WorldStorage,
-    world_dir: Path,
-    version: int,
-) -> int:
-    machine.start_at(LauncherState.DOWNLOAD)
-    metadata = restore_snapshot(storage, world_dir, version)
-    print(f"Restored v{metadata.version} into {world_dir}")
-    machine.transition(LauncherState.IDLE)
+def _new(args: argparse.Namespace) -> int:
+    from launcher.registry import WorldRegistry
+
+    settings = _settings()
+    world = WorldRegistry(settings.registry_file).add(
+        args.name, args.version or settings.minecraft_version
+    )
+    print(f"Created {world['name']} ({world['id']})")
+    print("Share this id with friends so they can 'nomad join' it.")
     return 0
 
 
-def _write_pid_file(world_dir: Path) -> None:
-    (world_dir / PID_FILE_NAME).write_text(str(os.getpid()), encoding="utf-8")
+def _join(args: argparse.Namespace) -> int:
+    from launcher.registry import WorldRegistry
+
+    settings = _settings()
+    registry = WorldRegistry(settings.registry_file)
+    world_id = args.world_id.strip()
+    if registry.get(world_id) is not None:
+        print(f"World {world_id} is already in the registry.")
+        return 0
+    world = registry.add_with_id(
+        world_id,
+        name=args.name or world_id[:8],
+        minecraft_version=settings.minecraft_version,
+    )
+    print(f"Added {world['name']} ({world_id}). Host it with 'nomad play' or the launcher.")
+    return 0
 
 
-def _remove_pid_file(world_dir: Path) -> None:
-    pid_file = world_dir / PID_FILE_NAME
-    if pid_file.exists():
-        pid_file.unlink()
+def _play(args: argparse.Namespace) -> int:
+    from launcher.agent import HostAgent
+    from launcher.registry import WorldRegistry
+
+    settings = _settings()
+    if not args.accept_eula and not settings.eula_accepted:
+        print("Minecraft EULA not accepted. Pass --accept-eula or set NOMAD_EULA_ACCEPTED=true.")
+        return 1
+    if not _configured(settings):
+        print("R2 not configured. Run 'nomad config' to see what to set.")
+        return 1
+
+    registry = WorldRegistry(settings.registry_file)
+    world = registry.get(args.world_id)
+    if world is None:
+        print(f"Unknown world {args.world_id}. Add it first with 'nomad join'.")
+        return 1
+
+    print(f"Hosting {world['name']}… press Ctrl-C to stop and push the world.")
+    agent = HostAgent(settings, _store(settings), world)
+    return agent.host()
+
+
+def _status(args: argparse.Namespace) -> int:
+    settings = _settings()
+    if not _configured(settings):
+        print("R2 not configured. Run 'nomad config'.")
+        return 1
+    try:
+        status = _store(settings).status(args.world_id)
+    except Exception as exc:
+        print(f"Could not reach world storage: {exc}")
+        return 1
+    if status.get("hosted"):
+        print(f"Hosted by {status['holder']} (expires {status.get('expires_at')})")
+        if status.get("address"):
+            print(f"Address: {status['address']}")
+    else:
+        print("Not hosted right now — press play to become the host.")
+    return 0
 
 
 if __name__ == "__main__":

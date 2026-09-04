@@ -13,15 +13,11 @@ venv/
 .coverage
 htmlcov/
 
-# Bundle build caches (downloads: PostgreSQL binaries, Temurin JRE)
-scripts/bundle/.cache/
-scripts/bundle/work/
-
 # Environment
 .env
 *.env.local
 
-# Nomad local data (worlds, snapshots, runtime, state) — created next to the app at runtime
+# Nomad local data (worlds, registry, settings, runtime) — created at runtime
 /.nomad/
 /data/
 /worlds/
