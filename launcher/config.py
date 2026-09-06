@@ -72,6 +72,24 @@ class LauncherSettings(BaseSettings):
     # https://<account_id>.r2.cloudflarestorage.com).
     r2_endpoint_url: str = ""
 
+    # --- storage backend selection -------------------------------------
+    # Which direction to use for the world lease + blob.
+    #   "r2"   -> Cloudflare R2 (or any S3 endpoint)
+    #   "git"  -> a git repo (free, unlimited storage, 100 MB per-file cap)
+    #   "vps"  -> your own S3/MinIO server
+    storage_backend: str = "r2"
+
+    # --- git backend ---------------------------------------------------
+    git_repo_dir: Path = Path(os.environ.get("NOMAD_GIT_REPO", "~/.nomad/repo")).expanduser()
+    git_remote_url: str = os.environ.get("NOMAD_GIT_REMOTE", "")
+
+    # --- VPS backend ---------------------------------------------------
+    # The VPS path reuses the R2 code pointed at your own S3-compatible
+    # endpoint (MinIO/Garage). Set endpoint url + bucket; access/secret follow
+    # the same NOMAD_R2_* env vars or data/settings.json.
+    vps_endpoint_url: str = os.environ.get("NOMAD_VPS_ENDPOINT", "")
+    vps_bucket: str = os.environ.get("NOMAD_VPS_BUCKET", "")
+
     # --- Minecraft -------------------------------------------------------
     data_dir: Path = Field(default_factory=_default_data_dir)
     minecraft_version: str = "1.21.1"
@@ -120,6 +138,11 @@ class LauncherSettings(BaseSettings):
     def settings_file(self) -> Path:
         return self.data_dir / _SETTINGS_FILE_NAME
 
+    @property
+    def usage_file(self) -> Path:
+        """Approximate local R2 usage counters (CumulativeBytesSent etc.)."""
+        return self.data_dir / "usage.json"
+
     def server_properties(self):
         from launcher.server_properties import ServerProperties
 
@@ -127,20 +150,47 @@ class LauncherSettings(BaseSettings):
 
 
 def load_settings_file(settings: LauncherSettings) -> LauncherSettings:
-    """Overlay persisted UI settings (R2 creds, player name, address) on top of
-    env/default settings. Mutates and returns the given settings object."""
+    """Overlay persisted data-dir settings on top of env/.env defaults.
+
+    Precedence (highest first): explicit OS environment variables, then the
+    values stored by the GUI in ``data/settings.json``, then ``.env``, then
+    built-in defaults. We only overwrite a field from ``settings.json`` when
+    the user has not set the corresponding environment variable, so a CI/token
+    injected at deploy time always wins over a stale cached value.
+    """
     path = settings.settings_file
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            data = {}
+    if not path.exists():
+        return settings
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return settings
+
+    def _env(varname: str) -> bool:
+        return bool(os.environ.get(varname))
+
+    if not _env("NOMAD_R2_ACCOUNT_ID"):
         settings.r2_account_id = data.get("r2_account_id", settings.r2_account_id)
+    if not _env("NOMAD_R2_ACCESS_KEY"):
         settings.r2_access_key = data.get("r2_access_key", settings.r2_access_key)
+    if not _env("NOMAD_R2_SECRET_KEY"):
         settings.r2_secret_key = data.get("r2_secret_key", settings.r2_secret_key)
+    if not _env("NOMAD_R2_BUCKET"):
         settings.r2_bucket = data.get("r2_bucket", settings.r2_bucket)
+    if not _env("NOMAD_PLAYER_NAME"):
         settings.player_name = data.get("player_name", settings.player_name)
+    if not _env("NOMAD_PUBLIC_ADDRESS"):
         settings.public_address = data.get("public_address", settings.public_address)
+    if not _env("NOMAD_STORAGE_BACKEND"):
+        settings.storage_backend = data.get("storage_backend", settings.storage_backend)
+    if not _env("NOMAD_VPS_ENDPOINT"):
+        settings.vps_endpoint_url = data.get("vps_endpoint_url", settings.vps_endpoint_url)
+    if not _env("NOMAD_VPS_BUCKET"):
+        settings.vps_bucket = data.get("vps_bucket", settings.vps_bucket)
+    if not _env("NOMAD_GIT_REPO"):
+        settings.git_repo_dir = Path(data.get("git_repo_dir", str(settings.git_repo_dir)))
+    if not _env("NOMAD_GIT_REMOTE"):
+        settings.git_remote_url = data.get("git_remote_url", settings.git_remote_url)
     return settings
 
 
@@ -153,6 +203,11 @@ def save_settings_file(settings: LauncherSettings) -> None:
         "r2_bucket": settings.r2_bucket,
         "player_name": settings.player_name,
         "public_address": settings.public_address,
+        "storage_backend": settings.storage_backend,
+        "vps_endpoint_url": settings.vps_endpoint_url,
+        "vps_bucket": settings.vps_bucket,
+        "git_repo_dir": str(settings.git_repo_dir),
+        "git_remote_url": settings.git_remote_url,
     }
     settings.settings_file.parent.mkdir(parents=True, exist_ok=True)
     settings.settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")

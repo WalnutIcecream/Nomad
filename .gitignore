@@ -17,7 +17,13 @@ htmlcov/
 .env
 *.env.local
 
-# Nomad local data (worlds, registry, settings, runtime) — created at runtime
+# Build caches (JRE zip download, PyInstaller work/spec)
+scripts/app/.cache/
+scripts/app/spec/
+build/
+dist/
+
+# Nomad runtime data (worlds, registry, settings, runtime) — generated at runtime
 /.nomad/
 /data/
 /worlds/

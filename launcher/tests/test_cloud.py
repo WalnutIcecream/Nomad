@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from launcher.cloud import LeaseError, WorldStore
+from launcher.cloud import LeaseError, UsageCounter, WorldStore
 from launcher.tests.fake_s3 import FakeS3Client, lease_body
 
 
-def make_shared_store(player: str, client: FakeS3Client) -> WorldStore:
-    return WorldStore(client, player_name=player)
+def make_shared_store(player: str, client: FakeS3Client, usage: UsageCounter | None = None) -> WorldStore:
+    return WorldStore(client, player_name=player, usage=usage)
 
 
 def test_first_acquire_wins() -> None:
@@ -118,3 +118,47 @@ def test_status_reflects_hosting() -> None:
     assert status["hosted"] is True
     assert status["holder"] == "alice"
     assert status["address"] == "1.2.3.4:25565"
+
+
+def test_upload_overwrites_single_world_object(tmp_path: Path) -> None:
+    """Re-saving a world must never accumulate version objects."""
+    from launcher.cloud import world_key
+
+    client = FakeS3Client()
+    store = make_shared_store("alice", client)
+    a1 = tmp_path / "a1.tar.gz"
+    a1.write_bytes(b"version-one")
+    store.upload_world("world-1", a1)
+    a2 = tmp_path / "a2.tar.gz"
+    a2.write_bytes(b"version-two")
+    store.upload_world("world-1", a2)
+
+    # Same key, still just one object, last write wins.
+    assert len(client.objects) == 1
+    assert world_key("world-1") in client.objects
+    assert client.objects[world_key("world-1")][0] == b"version-two"
+
+
+def test_usage_counter_tracks_operations(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    usage = UsageCounter(tmp_path / "usage.json")
+    store = make_shared_store("alice", client, usage=usage)
+
+    lease = store.acquire("world-1")        # +1 api, +1 world_count
+    lease = store.renew("world-1", lease)   # +1 api
+    store.release("world-1", lease)         # +1 api
+    archive = tmp_path / "w.tar.gz"
+    archive.write_bytes(b"data" * 1000)
+    store.upload_world("world-1", archive)   # +1 upload, +4000 bytes
+    store.download_world("world-1", tmp_path / "out.tar.gz")  # +1 download
+
+    snap = usage.snapshot()
+    assert snap["world_count"] == 1
+    assert snap["upload_count"] == 1
+    assert snap["download_count"] == 1
+    assert snap["uploaded_bytes"] == 4000
+    assert snap["api_request_count"] >= 3  # acquire+renew+release
+
+    # Counters persist across instances.
+    usage2 = UsageCounter(tmp_path / "usage.json")
+    assert usage2.snapshot()["world_count"] == 1

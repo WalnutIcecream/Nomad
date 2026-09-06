@@ -41,6 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="show who currently hosts a world")
     status.add_argument("world_id", help="world id")
 
+    subparsers.add_parser("usage", help="show approximate local R2 usage counters")
+
+    storage = subparsers.add_parser("storage", help="choose and inspect the storage backend")
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    storage_set = storage_sub.add_parser("set", help="select a backend direction")
+    storage_set.add_argument("backend", choices=["r2", "git", "vps"], help="which storage direction to use")
+    storage_sub.add_parser("status", help="show the active backend and its settings")
+
     return parser
 
 
@@ -65,6 +73,13 @@ def main(argv: list[str] | None = None) -> int:
             return _play(args)
         if args.command == "status":
             return _status(args)
+        if args.command == "usage":
+            return _usage(args)
+        if args.command == "storage":
+            if args.storage_command == "set":
+                return _storage_set(args)
+            if args.storage_command == "status":
+                return _storage_status()
         parser.error("unknown command")
         return 2
     except KeyboardInterrupt:
@@ -85,17 +100,10 @@ def _configured(settings: LauncherSettings) -> bool:
 
 
 def _store(settings: LauncherSettings):
-    from launcher.cloud import S3Client, WorldStore
+    from launcher.cloud import UsageCounter
+    from launcher.storage import build_store
 
-    return WorldStore(
-        S3Client(
-            settings.endpoint_url,
-            settings.r2_access_key,
-            settings.r2_secret_key,
-            settings.r2_bucket,
-        ),
-        player_name=settings.player_name,
-    )
+    return build_store(settings, usage=UsageCounter(settings.usage_file))
 
 
 def _config() -> int:
@@ -191,6 +199,47 @@ def _play(args: argparse.Namespace) -> int:
     print(f"Hosting {world['name']}… press Ctrl-C to stop and push the world.")
     agent = HostAgent(settings, _store(settings), world)
     return agent.host()
+
+
+def _storage_set(args: argparse.Namespace) -> int:
+    from launcher.config import save_settings_file
+
+    settings = _settings()
+    settings.storage_backend = args.backend
+    save_settings_file(settings)
+    print(f"storage backend set to: {args.backend}")
+    return 0
+
+
+def _storage_status() -> int:
+    from launcher.storage import build_store
+
+    settings = _settings()
+    print(f"backend: {settings.storage_backend}")
+    try:
+        store = build_store(settings)
+        print(f"  type:     {store.name}")
+        print(f"  repo:     {getattr(settings, 'git_repo_dir', '-')}")
+        print(f"  endpoint: {getattr(settings, 'vps_endpoint_url', settings.r2_endpoint_url) or '-'}")
+        print(f"  bucket:   {getattr(settings, 'vps_bucket', settings.r2_bucket) or '-'}")
+    except Exception as exc:
+        print(f"  error:    {exc}")
+    return 0
+
+
+def _usage(args: argparse.Namespace) -> int:
+    from launcher.cloud import UsageCounter
+
+    settings = _settings()
+    usage = UsageCounter(settings.usage_file).snapshot()
+    print("Approximate local R2 usage (free limits: 1M Class A / 10M Class B / 10 GB-month):")
+    print(f"  worlds tracked:    {usage['world_count']}")
+    print(f"  uploaded bytes:    {usage['uploaded_bytes']:,} ({usage['uploaded_bytes']/1_000_000:.2f} MB)")
+    print(f"  uploads:           {usage['upload_count']}")
+    print(f"  downloads:         {usage['download_count']}")
+    print(f"  api requests:      {usage['api_request_count']}")
+    print("Authoritative numbers live in the Cloudflare R2 dashboard.")
+    return 0
 
 
 def _status(args: argparse.Namespace) -> int:

@@ -245,26 +245,97 @@ class Lease:
         }
         return json.dumps(payload).encode("utf-8")
 
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "holder": self.holder,
+            "address": self.address,
+            "acquired_at": self.acquired_at,
+            "expires_at": self.expires_at,
+        }
+
 
 def lease_key(world_id: str) -> str:
     return f"worlds/{world_id}/lease.json"
 
 
 def world_key(world_id: str) -> str:
+    # Deliberately a single, stable key per world: every upload overwrites the
+    # same object (no v1/v2/... accumulation), so storage stays bounded by the
+    # number of worlds, not the number of saves. Per the R2 pricing policy,
+    # only retained versions grow storage cost — we never create them.
     return f"worlds/{world_id}/world.tar.gz"
+
+
+# --------------------------------------------------------------------------
+# Usage telemetry
+# --------------------------------------------------------------------------
+
+_USAGE_FIELDS = (
+    "world_count",
+    "uploaded_bytes",
+    "upload_count",
+    "download_count",
+    "api_request_count",
+)
+
+
+def empty_usage() -> dict:
+    return {k: 0 for k in _USAGE_FIELDS}
+
+
+class UsageCounter:
+    """Persisted R2 usage counters so admins can watch the free-allowance
+    thresholds instead of discovering them in a bill.
+
+    The counters are deliberately local and approximate — the authoritative
+    numbers come from Cloudflare's dashboard. This exists to give the app a
+    rough, always-available signal (stored worlds, bytes, upload/download
+    counts, request frequency) without adding any external telemetry service.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> dict:
+        if not self.path.exists():
+            return empty_usage()
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return empty_usage()
+        return {k: data.get(k, 0) for k in _USAGE_FIELDS}
+
+    def record(self, **delta: int) -> None:
+        usage = self.load()
+        for key, value in delta.items():
+            usage[key] = usage.get(key, 0) + value
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def snapshot(self) -> dict:
+        return self.load()
 
 
 class WorldStore:
     """R2-backed world coordinator: lease + world blob behind one object set."""
 
-    def __init__(self, client: S3Client, player_name: str = "me") -> None:
+    def __init__(self, client: S3Client, player_name: str = "me", usage: UsageCounter | None = None) -> None:
         self.client = client
         self.player_name = player_name
+        self.usage = usage
+
+    def _track(self, **delta: int) -> None:
+        if self.usage is not None:
+            self.usage.record(**delta)
 
     # --- status ----------------------------------------------------------
 
     def status(self, world_id: str) -> dict:
         """Public status: whether the world is hosted and by whom."""
+        self._track(api_request_count=1)
         raw = self.client.get_object_if_exists(lease_key(world_id))
         if raw is None:
             return {"hosted": False, "holder": None, "address": None}
@@ -287,6 +358,7 @@ class WorldStore:
 
     def acquire(self, world_id: str, address: str | None = None) -> Lease:
         """Become the host, or raise ``LeaseError`` if someone already is."""
+        self._track(api_request_count=1)
         now = _now()
         lease = Lease(
             status="active",
@@ -303,11 +375,13 @@ class WorldStore:
                 lease_key(world_id), body, if_none_match=True, content_type="application/json"
             )
             lease.etag = etag
+            self._track(world_count=1)
             return lease
         except LeaseError:
             pass  # a lease already exists; fall through to stale-steal
 
         # A lease exists. Read it and try to take over only if it is dead.
+        self._track(api_request_count=1)
         current_raw, current_etag = self.client.get_object_etag(lease_key(world_id))
         current = Lease.from_object(current_raw, etag=current_etag)
         if current.is_active:
@@ -322,11 +396,13 @@ class WorldStore:
             )
         except LeaseError as exc:
             raise LeaseError(412, "someone else claimed the world first") from exc
+        self._track(api_request_count=1)
         lease.etag = etag
         return lease
 
     def renew(self, world_id: str, lease: Lease) -> Lease:
         """Extend our lease (must still hold the etag)."""
+        self._track(api_request_count=1)
         now = _now()
         updated = Lease(
             status="active",
@@ -343,6 +419,7 @@ class WorldStore:
 
     def release(self, world_id: str, lease: Lease) -> None:
         """Mark the lease released so the next acquirer can take over."""
+        self._track(api_request_count=1)
         released = Lease(
             status="released",
             holder=lease.holder,
@@ -363,11 +440,18 @@ class WorldStore:
             return False
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(raw)
+        self._track(download_count=1)
         return True
 
     def upload_world(self, world_id: str, archive: Path) -> None:
-        """Upload a new shared world archive (must hold the lease to matter)."""
+        """Upload a new shared world archive (must hold the lease to matter).
+
+        Overwrites the single per-world object — never accumulates versions —
+        so storage stays bounded by the number of worlds, not the number of saves.
+        """
+        size = archive.stat().st_size
         self.client.put_object(world_key(world_id), archive.read_bytes())
+        self._track(upload_count=1, uploaded_bytes=size)
 
 
 LEASE_SECONDS = 300

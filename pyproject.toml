@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nomad"
 version = "0.2.0"
-description = "Distributed Minecraft hosting via Cloudflare R2 object storage"
+description = "Distributed Minecraft hosting over pluggable object storage (R2, git, or self-hosted S3)"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
