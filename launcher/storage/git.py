@@ -18,12 +18,14 @@ should use R2/VPS), and friends need push access (SSH key / PAT).
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import shutil
 import subprocess
 from pathlib import Path
 
 from launcher.cloud import Lease, LeaseError, UsageCounter
+from launcher.secrets import redact
 from launcher.storage import WorldStoreProtocol
 
 LEASE_SECONDS = 300
@@ -58,7 +60,7 @@ class GitWorldStore(WorldStoreProtocol):
             timeout=120,
         )
         if check and result.returncode != 0:
-            raise LeaseError(result.returncode, (result.stderr or result.stdout).strip())
+            raise LeaseError(result.returncode, redact((result.stderr or result.stdout).strip()))
         return result.stdout.strip()
 
     def _ensure_repo(self) -> None:
@@ -91,7 +93,7 @@ class GitWorldStore(WorldStoreProtocol):
             timeout=120,
         )
         if result.returncode != 0:
-            raise LeaseError(result.returncode, (result.stderr or result.stdout).strip())
+            raise LeaseError(result.returncode, redact((result.stderr or result.stdout).strip()))
 
     # --- world paths ----------------------------------------------------
 
@@ -214,8 +216,19 @@ class GitWorldStore(WorldStoreProtocol):
         blob = self._blob_path(world_id)
         if not blob.exists():
             return False
+        raw = blob.read_bytes()
+        hash_path = self._world_dir(world_id) / "world.sha256"
+        if hash_path.exists():
+            expected = hash_path.read_text(encoding="utf-8").strip()
+            actual = hashlib.sha256(raw).hexdigest()
+            if expected and actual != expected:
+                raise LeaseError(
+                    422,
+                    f"world integrity check failed for {world_id}: "
+                    f"expected {expected[:12]}, got {actual[:12]}",
+                )
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(blob.read_bytes())
+        dest.write_bytes(raw)
         return True
 
     def upload_world(self, world_id: str, archive: Path) -> None:
@@ -224,6 +237,8 @@ class GitWorldStore(WorldStoreProtocol):
         world_dir = self._world_dir(world_id)
         world_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(archive, self._blob_path(world_id))
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (world_dir / "world.sha256").write_text(digest, encoding="utf-8")
         self._git("add", "-A")
         self._git("commit", "-m", f"world {world_id}")
         try:

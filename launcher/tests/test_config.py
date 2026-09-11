@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from launcher.config import LauncherSettings, load_settings_file, save_settings_file
+from launcher.secrets import secret_value
 
 
 def test_settings_round_trip(tmp_path: Path) -> None:
@@ -22,11 +23,19 @@ def test_settings_round_trip(tmp_path: Path) -> None:
     loaded.data_dir = tmp_path
     load_settings_file(loaded)
     assert loaded.r2_account_id == "acct"
-    assert loaded.r2_access_key == "key"
-    assert loaded.r2_secret_key == "secret"
+    assert secret_value(loaded.r2_access_key) == "key"
+    assert secret_value(loaded.r2_secret_key) == "secret"
     assert loaded.r2_bucket == "bkt"
     assert loaded.player_name == "alice"
     assert loaded.public_address == "203.0.113.5:25565"
+
+
+def test_secrets_are_secretstr_and_do_not_repr(tmp_path: Path) -> None:
+    s = LauncherSettings(_env_file=None)
+    s.r2_secret_key = "super-secret-value"
+    assert "super-secret-value" not in repr(s)
+    assert "super-secret-value" not in str(s.r2_secret_key)
+    assert secret_value(s.r2_secret_key) == "super-secret-value"
 
 
 def test_env_overrides_settings_file(tmp_path: Path, monkeypatch) -> None:
@@ -55,3 +64,84 @@ def test_bucket_env_drives_endpoint(tmp_path: Path, monkeypatch) -> None:
 def test_version_agnostic_defaults() -> None:
     s = LauncherSettings(_env_file=None)
     assert s.minecraft_version  # default is set; worlds can override per-world
+
+
+# --- credentials at rest ---------------------------------------------------
+
+
+def _posix_only() -> bool:
+    return os.name == "posix"
+
+
+def test_settings_file_is_owner_only(tmp_path: Path) -> None:
+    if not _posix_only():
+        return
+    s = LauncherSettings(_env_file=None)
+    s.data_dir = tmp_path / "data"
+    s.r2_secret_key = "secret"
+    save_settings_file(s)
+    assert (s.settings_file.stat().st_mode & 0o777) == 0o600
+    assert (s.settings_file.parent.stat().st_mode & 0o777) == 0o700
+
+
+def test_loose_settings_file_is_tightened(tmp_path: Path) -> None:
+    if not _posix_only():
+        return
+    s = LauncherSettings(_env_file=None)
+    s.data_dir = tmp_path / "data"
+    s.r2_secret_key = "secret"
+    save_settings_file(s)
+    os.chmod(s.settings_file, 0o644)
+
+    loaded = LauncherSettings(_env_file=None)
+    loaded.data_dir = tmp_path / "data"
+    load_settings_file(loaded)
+    assert (s.settings_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_unprotectable_settings_file_refuses_to_load(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    from launcher import config as config_module
+
+    if not _posix_only():
+        return
+
+    s = LauncherSettings(_env_file=None)
+    s.data_dir = tmp_path / "data"
+    s.r2_secret_key = "secret"
+    save_settings_file(s)
+    os.chmod(s.settings_file, 0o644)
+
+    def _deny(path, mode):
+        raise OSError("operation not permitted")
+
+    monkeypatch.setattr(config_module.os, "chmod", _deny)
+    loaded = LauncherSettings(_env_file=None)
+    loaded.data_dir = tmp_path / "data"
+    with pytest.raises(PermissionError):
+        load_settings_file(loaded)
+
+
+def test_loading_registers_secrets_for_redaction(tmp_path: Path) -> None:
+    from launcher import secrets
+
+    secrets.clear_secrets()
+    s = LauncherSettings(_env_file=None)
+    s.data_dir = tmp_path
+    s.r2_access_key = "AKIAEXAMPLEACCESSKEY"
+    s.r2_secret_key = "verysecretvalue123"
+    save_settings_file(s)
+
+    loaded = LauncherSettings(_env_file=None)
+    loaded.data_dir = tmp_path
+    load_settings_file(loaded)
+    try:
+        assert "verysecretvalue123" not in secrets.redact(
+            "failed with verysecretvalue123 in the message"
+        )
+        assert "AKIAEXAMPLEACCESSKEY" not in secrets.redact(
+            "key AKIAEXAMPLEACCESSKEY used"
+        )
+    finally:
+        secrets.clear_secrets()

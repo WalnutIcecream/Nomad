@@ -42,6 +42,11 @@ class ProcessHandle:
     def is_running(self) -> bool:
         return self._process.poll() is None
 
+    def terminate(self) -> None:
+        """Force-stop the process (used when no graceful stop command exists)."""
+        if self._process.poll() is None:
+            self._process.terminate()
+
     def wait(self, timeout: float | None = None) -> int:
         return self._process.wait(timeout=timeout)
 

@@ -31,6 +31,8 @@ def _settings(tmp: Path, player: str) -> MagicMock:
     s.eula_accepted = True
     s.java_path = "java"
     s.lease_duration_seconds = 60
+    # Booleans must be concrete: a bare MagicMock attribute is truthy.
+    s.ssh_reverse_tunnel = False
     return s
 
 
@@ -138,3 +140,43 @@ def test_host_denied_when_someone_else_active(tmp_path: Path) -> None:
     bob = HostAgent(_settings(tmp_path, "bob"), bob_store, WORLD, runtime=bob_runtime)
     assert bob.host() == 1
     assert bob_runtime.started is False
+
+
+def test_manifest_selects_uploaded_files(tmp_path: Path) -> None:
+    """A nomad.json makes the agent sync exactly the listed paths (any game)."""
+    import io
+    import tarfile
+
+    from launcher.manifest import ServerManifest, save_manifest
+
+    settings = _settings(tmp_path, "alice")
+    run_dir = settings.worlds_dir / "w1"
+    run_dir.mkdir(parents=True)
+    # A non-Minecraft layout the manifest knows how to sync.
+    (run_dir / "Worlds").mkdir()
+    (run_dir / "Worlds" / "world1.wld").write_bytes(b"the-save")
+    (run_dir / "config.json").write_text("{}")
+    (run_dir / "server.log").write_text("noise")
+    save_manifest(
+        run_dir,
+        ServerManifest(
+            name="Terraria",
+            include=["Worlds/", "config.json"],
+            exclude=["*.log"],
+        ),
+    )
+
+    client = FakeS3Client()
+    store = WorldStore(client, player_name="alice")
+    runtime = FakeRuntime()
+    agent = HostAgent(settings, store, WORLD, runtime=runtime)
+    assert _host_until_stopped(agent, runtime) == 0
+
+    # The uploaded archive contains only manifest-selected paths.
+    raw = client.objects[world_key("w1")][0]
+    with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
+        names = set(tar.getnames())
+    assert "Worlds/world1.wld" in names
+    assert "config.json" in names
+    assert "nomad.json" in names  # the pointer file travels with the world
+    assert "server.log" not in names

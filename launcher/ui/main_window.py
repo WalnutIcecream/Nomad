@@ -23,9 +23,10 @@ from PySide6.QtWidgets import (
 )
 
 from launcher.agent import HostAgent
-from launcher.cloud import S3Client, WorldStore
+from launcher.cloud import UsageCounter
 from launcher.config import LauncherSettings
 from launcher.registry import WorldRegistry
+from launcher.storage import WorldStoreProtocol, build_store as build_backend
 from launcher.ui.connection_dialog import ConnectionDialog
 from launcher.ui.settings_dialog import SettingsDialog
 from launcher.ui.widgets import WorldCard
@@ -35,22 +36,16 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_MS = 3000
 
 
-def build_store(settings: LauncherSettings) -> WorldStore | None:
-    """Construct the R2 client + store from settings, or None if unconfigured."""
-    if not (
-        settings.r2_account_id
-        and settings.r2_access_key
-        and settings.r2_secret_key
-        and settings.r2_bucket
-    ):
+def build_store(settings: LauncherSettings) -> WorldStoreProtocol | None:
+    """Construct the configured storage backend, or None if it is unconfigured.
+
+    Returns None (rather than raising) so the window can open and prompt for
+    settings instead of crashing on a missing config.
+    """
+    try:
+        return build_backend(settings, usage=UsageCounter(settings.usage_file))
+    except Exception:
         return None
-    client = S3Client(
-        settings.endpoint_url,
-        settings.r2_access_key,
-        settings.r2_secret_key,
-        settings.r2_bucket,
-    )
-    return WorldStore(client, player_name=settings.player_name)
 
 
 class MainWindow(QWidget):

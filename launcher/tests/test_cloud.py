@@ -133,10 +133,34 @@ def test_upload_overwrites_single_world_object(tmp_path: Path) -> None:
     a2.write_bytes(b"version-two")
     store.upload_world("world-1", a2)
 
-    # Same key, still just one object, last write wins.
-    assert len(client.objects) == 1
+    # Exactly one blob object, last write wins (plus one hash companion object).
+    blobs = [k for k in client.objects if k.endswith("world.tar.gz")]
+    assert len(blobs) == 1
     assert world_key("world-1") in client.objects
     assert client.objects[world_key("world-1")][0] == b"version-two"
+
+
+def test_download_verifies_sha256(tmp_path: Path) -> None:
+    import hashlib
+
+    from launcher.cloud import CloudError, world_hash_key, world_key
+
+    client = FakeS3Client()
+    store = make_shared_store("alice", client)
+    archive = tmp_path / "w.tar.gz"
+    archive.write_bytes(b"good-world")
+    store.upload_world("world-1", archive)
+
+    # The companion hash matches the blob.
+    stored = client.objects[world_key("world-1")][0]
+    stored_hash = client.objects[world_hash_key("world-1")][0].decode("utf-8")
+    assert stored_hash == hashlib.sha256(stored).hexdigest()
+
+    # Tamper with the stored blob: download must reject it.
+    blob, etag = client.objects[world_key("world-1")]
+    client.objects[world_key("world-1")] = (b"tampered", etag)
+    with pytest.raises(CloudError):
+        store.download_world("world-1", tmp_path / "out.tar.gz")
 
 
 def test_usage_counter_tracks_operations(tmp_path: Path) -> None:

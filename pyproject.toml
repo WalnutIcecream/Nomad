@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nomad"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Distributed Minecraft hosting over pluggable object storage (R2, git, or self-hosted S3)"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -27,6 +27,9 @@ nomad-gui = "launcher.ui.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["launcher*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "launcher.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["launcher/tests"]

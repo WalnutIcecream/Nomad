@@ -1,26 +1,66 @@
-"""Launcher configuration for the R2-backed "no backend" design.
+"""Launcher configuration.
 
-A world lives as two objects in a Cloudflare R2 bucket: ``lease.json`` (who
-holds the host lease and until when) and ``world.tar.gz`` (the single shared
-version). Every setting here is a local preference; nothing requires an account
-or a server you run yourself.
+Storage and identity settings for every backend. Credential-bearing fields are
+``SecretStr`` so they cannot be logged or repr'd by accident; the persisted
+``settings.json`` is written ``0600`` in a ``0700`` directory and its permissions
+are checked (and tightened) on load.
 
-The R2 credentials are edited in the launcher UI and persisted to a small JSON
-file in the data dir (``settings.json``) — not to ``.env``, which the bundled
-app may not be able to write next to itself.
+Precedence: OS environment variables > ``data/settings.json`` > ``.env`` >
+built-in defaults.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from launcher.secrets import register_secret, register_url_secrets
+
+logger = logging.getLogger(__name__)
+
 _SETTINGS_FILE_NAME = "settings.json"
+
+
+def _ensure_private_dir(directory: Path) -> None:
+    """Create ``directory`` and, on POSIX, restrict it to the owner."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            logger.debug("could not tighten permissions on %s", directory)
+
+
+def _enforce_private_file(path: Path) -> None:
+    """Tighten a readable-by-others credentials file, or refuse to load it.
+
+    The file holds secrets in plaintext, so group/other access is not
+    acceptable. If we own the file we fix it silently; if we cannot, loading
+    stops with the exact command to run rather than proceeding insecurely.
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        return
+    if not mode & 0o077:
+        return
+    try:
+        os.chmod(path, 0o600)
+        logger.warning("tightened permissions on %s to 0600", path)
+    except OSError as exc:
+        raise PermissionError(
+            f"{path} is readable by other users and could not be protected "
+            f"({exc}). Fix it with: chmod 600 '{path}'"
+        ) from exc
 
 
 def default_java_path() -> str:
@@ -59,14 +99,15 @@ class LauncherSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        validate_assignment=True,
     )
 
     # --- R2 / object storage -------------------------------------------
     # Endpoint + credentials for the shared bucket. Get these from the
     # Cloudflare dashboard (R2 -> your bucket -> Manage R2 API Tokens).
     r2_account_id: str = ""
-    r2_access_key: str = ""
-    r2_secret_key: str = ""
+    r2_access_key: SecretStr = SecretStr("")
+    r2_secret_key: SecretStr = SecretStr("")
     r2_bucket: str = ""
     # Optional custom S3 endpoint override (defaults to the standard
     # https://<account_id>.r2.cloudflarestorage.com).
@@ -77,6 +118,7 @@ class LauncherSettings(BaseSettings):
     #   "r2"   -> Cloudflare R2 (or any S3 endpoint)
     #   "git"  -> a git repo (free, unlimited storage, 100 MB per-file cap)
     #   "vps"  -> your own S3/MinIO server
+    #   "ssh"  -> a home/bare-metal box you own, over ssh (no server software)
     storage_backend: str = "r2"
 
     # --- git backend ---------------------------------------------------
@@ -89,6 +131,24 @@ class LauncherSettings(BaseSettings):
     # the same NOMAD_R2_* env vars or data/settings.json.
     vps_endpoint_url: str = os.environ.get("NOMAD_VPS_ENDPOINT", "")
     vps_bucket: str = os.environ.get("NOMAD_VPS_BUCKET", "")
+
+    # --- SSH backend ---------------------------------------------------
+    # A home/bare-metal box used as storage. The world lives under
+    # <ssh_path>/<world-id>/ on the remote; sshd is the only requirement.
+    ssh_target: str = os.environ.get("NOMAD_SSH_TARGET", "")
+    ssh_path: str = os.environ.get("NOMAD_SSH_PATH", "nomad-worlds")
+    ssh_key: str = os.environ.get("NOMAD_SSH_KEY", "")
+    ssh_port: int = int(os.environ.get("NOMAD_SSH_PORT", "0") or "0")
+    # Optional reverse tunnel: publish the local game port through the ssh box
+    # so a host behind NAT needs no router configuration.
+    ssh_reverse_tunnel: bool = os.environ.get("NOMAD_SSH_REVERSE_TUNNEL", "") in ("1", "true", "yes")
+    ssh_remote_port: int = int(os.environ.get("NOMAD_SSH_REMOTE_PORT", "0") or "0")
+    # Address published in the lease when tunnelling (default: the ssh host).
+    ssh_remote_host: str = os.environ.get("NOMAD_SSH_REMOTE_HOST", "")
+
+    # --- diagnostics -----------------------------------------------------
+    # Write a non-secret audit trail of credential *use* to data/logs/audit.log.
+    audit_log: bool = os.environ.get("NOMAD_AUDIT_LOG", "1") not in ("0", "false", "no")
 
     # --- Minecraft -------------------------------------------------------
     data_dir: Path = Field(default_factory=_default_data_dir)
@@ -161,6 +221,7 @@ def load_settings_file(settings: LauncherSettings) -> LauncherSettings:
     path = settings.settings_file
     if not path.exists():
         return settings
+    _enforce_private_file(path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -191,15 +252,48 @@ def load_settings_file(settings: LauncherSettings) -> LauncherSettings:
         settings.git_repo_dir = Path(data.get("git_repo_dir", str(settings.git_repo_dir)))
     if not _env("NOMAD_GIT_REMOTE"):
         settings.git_remote_url = data.get("git_remote_url", settings.git_remote_url)
+    if not _env("NOMAD_SSH_TARGET"):
+        settings.ssh_target = data.get("ssh_target", settings.ssh_target)
+    if not _env("NOMAD_SSH_PATH"):
+        settings.ssh_path = data.get("ssh_path", settings.ssh_path)
+    if not _env("NOMAD_SSH_KEY"):
+        settings.ssh_key = data.get("ssh_key", settings.ssh_key)
+    if not _env("NOMAD_SSH_PORT"):
+        settings.ssh_port = int(data.get("ssh_port", settings.ssh_port) or 0)
+    if not _env("NOMAD_SSH_REVERSE_TUNNEL"):
+        settings.ssh_reverse_tunnel = bool(
+            data.get("ssh_reverse_tunnel", settings.ssh_reverse_tunnel)
+        )
+    if not _env("NOMAD_SSH_REMOTE_PORT"):
+        settings.ssh_remote_port = int(data.get("ssh_remote_port", settings.ssh_remote_port) or 0)
+    if not _env("NOMAD_SSH_REMOTE_HOST"):
+        settings.ssh_remote_host = data.get("ssh_remote_host", settings.ssh_remote_host)
+    if not _env("NOMAD_AUDIT_LOG"):
+        settings.audit_log = bool(data.get("audit_log", settings.audit_log))
+    _register_configured_secrets(settings)
     return settings
 
 
+def _register_configured_secrets(settings: LauncherSettings) -> None:
+    """Teach the redaction layer the exact secret values now in play."""
+    register_secret(settings.r2_access_key)
+    register_secret(settings.r2_secret_key)
+    register_url_secrets(settings.git_remote_url)
+
+
 def save_settings_file(settings: LauncherSettings) -> None:
-    """Persist the UI-editable settings to the data dir."""
+    """Persist settings to the data dir, owner-only where POSIX permissions apply.
+
+    The file holds credentials in plaintext, so it is created ``0600`` inside a
+    ``0700`` directory and swapped into place atomically. On Windows the file is
+    protected by the ACL on the data directory instead.
+    """
+    from launcher.secrets import secret_value
+
     payload = {
         "r2_account_id": settings.r2_account_id,
-        "r2_access_key": settings.r2_access_key,
-        "r2_secret_key": settings.r2_secret_key,
+        "r2_access_key": secret_value(settings.r2_access_key),
+        "r2_secret_key": secret_value(settings.r2_secret_key),
         "r2_bucket": settings.r2_bucket,
         "player_name": settings.player_name,
         "public_address": settings.public_address,
@@ -208,6 +302,27 @@ def save_settings_file(settings: LauncherSettings) -> None:
         "vps_bucket": settings.vps_bucket,
         "git_repo_dir": str(settings.git_repo_dir),
         "git_remote_url": settings.git_remote_url,
+        "ssh_target": settings.ssh_target,
+        "ssh_path": settings.ssh_path,
+        "ssh_key": settings.ssh_key,
+        "ssh_port": settings.ssh_port,
+        "ssh_reverse_tunnel": settings.ssh_reverse_tunnel,
+        "ssh_remote_port": settings.ssh_remote_port,
+        "ssh_remote_host": settings.ssh_remote_host,
+        "audit_log": settings.audit_log,
     }
-    settings.settings_file.parent.mkdir(parents=True, exist_ok=True)
-    settings.settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path = settings.settings_file
+    _ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name == "posix":
+            os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise

@@ -267,6 +267,11 @@ def world_key(world_id: str) -> str:
     return f"worlds/{world_id}/world.tar.gz"
 
 
+def world_hash_key(world_id: str) -> str:
+    """Companion object holding the SHA-256 of the world blob (hex text)."""
+    return f"worlds/{world_id}/world.sha256"
+
+
 # --------------------------------------------------------------------------
 # Usage telemetry
 # --------------------------------------------------------------------------
@@ -434,10 +439,25 @@ class WorldStore:
     # --- world blob ------------------------------------------------------
 
     def download_world(self, world_id: str, dest: Path) -> bool:
-        """Download the shared world archive into ``dest``. False if none yet."""
+        """Download the shared world archive into ``dest``. False if none yet.
+
+        If a companion ``world.sha256`` object exists, the downloaded bytes are
+        verified against it and a mismatch raises ``CloudError``. Verification
+        is skipped for worlds uploaded before the hash object existed.
+        """
         raw = self.client.get_object_if_exists(world_key(world_id))
         if raw is None:
             return False
+        expected_raw = self.client.get_object_if_exists(world_hash_key(world_id))
+        if expected_raw is not None:
+            expected = expected_raw.decode("utf-8").strip()
+            actual = hashlib.sha256(raw).hexdigest()
+            if expected and actual != expected:
+                raise CloudError(
+                    422,
+                    f"world integrity check failed for {world_id}: "
+                    f"expected {expected[:12]}, got {actual[:12]}",
+                )
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(raw)
         self._track(download_count=1)
@@ -448,9 +468,14 @@ class WorldStore:
 
         Overwrites the single per-world object — never accumulates versions —
         so storage stays bounded by the number of worlds, not the number of saves.
+        Also writes a companion SHA-256 so pullers can verify integrity.
         """
         size = archive.stat().st_size
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         self.client.put_object(world_key(world_id), archive.read_bytes())
+        self.client.put_object(
+            world_hash_key(world_id), digest.encode("utf-8"), content_type="text/plain"
+        )
         self._track(upload_count=1, uploaded_bytes=size)
 
 

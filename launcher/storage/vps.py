@@ -29,10 +29,14 @@ class VpsWorldStore(WorldStoreProtocol):
 
     @classmethod
     def build(cls, settings, usage: UsageCounter | None = None) -> "VpsWorldStore":
+        from launcher.secrets import secret_value
+
         endpoint = settings.vps_endpoint_url or settings.r2_endpoint_url
         bucket = settings.vps_bucket or settings.r2_bucket
-        access = getattr(settings, "vps_access_key", None) or settings.r2_access_key
-        secret = getattr(settings, "vps_secret_key", None) or settings.r2_secret_key
+        # VPS credentials default to the R2 ones; users who want separation set
+        # distinct keys in the environment.
+        access = secret_value(settings.r2_access_key)
+        secret = secret_value(settings.r2_secret_key)
         if not (endpoint and bucket and access and secret):
             raise ValueError(
                 "VPS backend requires NOMAD_VPS_ENDPOINT, NOMAD_VPS_BUCKET and access/secret keys"

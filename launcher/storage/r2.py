@@ -24,17 +24,16 @@ class R2WorldStore(WorldStoreProtocol):
 
     @classmethod
     def build(cls, settings, usage: UsageCounter | None = None) -> "R2WorldStore":
-        if not (
-            settings.r2_account_id
-            and settings.r2_access_key
-            and settings.r2_secret_key
-            and settings.r2_bucket
-        ):
+        from launcher.secrets import secret_value
+
+        access = secret_value(settings.r2_access_key)
+        secret = secret_value(settings.r2_secret_key)
+        if not (settings.r2_account_id and access and secret and settings.r2_bucket):
             raise ValueError("R2 backend requires account_id, access_key, secret_key and bucket")
         client = S3Client(
             settings.endpoint_url,
-            settings.r2_access_key,
-            settings.r2_secret_key,
+            access,
+            secret,
             settings.r2_bucket,
         )
         return cls(WorldStore(client, player_name=settings.player_name, usage=usage))

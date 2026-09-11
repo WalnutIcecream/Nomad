@@ -1,15 +1,16 @@
 """Storage backend protocol and registry for Nomad worlds.
 
 A *backend* is anything that can answer the world-lease primitive and hold a
-world blob. There are three built-in directions:
+world blob. There are four built-in directions:
 
 * ``r2``   -> Cloudflare R2 / any S3 endpoint (``launcher.storage.r2``)
 * ``git``  -> a git repo (mundane, free, unlimited storage) (``launcher.storage.git``)
 * ``vps``  -> your own server over S3/MinIO (``launcher.storage.vps``)
+* ``ssh``  -> a home/bare-metal box you own, over ssh (``launcher.storage.ssh``)
 
 The launcher, agent and CLI talk only to the ``WorldStoreProtocol``; the
 backend is selected once via ``nomad storage set`` and its settings live in
-``LauncherSettings``. Adding a fourth direction means implementing the protocol
+``LauncherSettings``. Adding a fifth direction means implementing the protocol
 and adding one entry to ``build_store`` — the rest of the app never changes.
 """
 
@@ -23,7 +24,7 @@ from launcher.cloud import Lease, UsageCounter
 
 @runtime_checkable
 class WorldStoreProtocol(Protocol):
-    """The storage contract every backend (r2, git, vps) must satisfy."""
+    """The storage contract every backend (r2, git, vps, ssh) must satisfy."""
 
     name: str
 
@@ -67,6 +68,10 @@ def build_store(settings, usage: UsageCounter | None = None) -> WorldStoreProtoc
         from launcher.storage.vps import VpsWorldStore
 
         return VpsWorldStore.build(settings, usage=usage)
+    if backend == "ssh":
+        from launcher.storage.ssh import SshWorldStore
+
+        return SshWorldStore.build(settings, usage=usage)
     raise ValueError(f"unknown storage backend: {backend!r}")
 
 

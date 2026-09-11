@@ -61,6 +61,15 @@ _HIDDEN = [
     "launcher.cloud",
     "launcher.registry",
     "launcher.config",
+    "launcher.manifest",
+    "launcher.process_runtime",
+    "launcher.tunnel",
+    "launcher.secrets",
+    "launcher.audit",
+    "launcher.ssh_connection",
+    "launcher.ssh_identity",
+    "launcher.ssh_provision",
+    "launcher.ui.ssh_setup_dialog",
     "launcher.server_properties",
     "launcher.minecraft.vanilla",
     "launcher.minecraft.base",
@@ -70,6 +79,7 @@ _HIDDEN = [
     "launcher.storage.r2",
     "launcher.storage.git",
     "launcher.storage.vps",
+    "launcher.storage.ssh",
 ]
 
 # Extra data PySide6 needs that PyInstaller's hooks sometimes miss.
@@ -142,6 +152,9 @@ def _pyi(name: str, script: Path, *, windowed: bool = False, collect: bool = Fal
             cmd += ["--collect-all", pkg]
     for mod in _HIDDEN:
         cmd += ["--hidden-import", mod]
+    icon = ROOT / "assets" / "nomad.ico"
+    if icon.exists():
+        cmd += ["--icon", str(icon)]
     if onefile:
         cmd.append("--onefile")
     if windowed:
@@ -187,7 +200,7 @@ def main() -> int:
         p.stat().st_size for p in OUT.rglob("*") if p.is_file()
     ) // (1024 * 1024)
     print(f"\napp ready at {OUT} (~{size_mb} MB)", flush=True)
-    print("set R2 credentials via env vars or data/settings.json, then run Nomad(.exe).", flush=True)
+    print("configure storage (env vars or data/settings.json), then run Nomad(.exe).", flush=True)
     return 0
 
 
