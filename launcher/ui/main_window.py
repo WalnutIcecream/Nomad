@@ -1,9 +1,10 @@
-"""The PySide6 launcher window for the R2-backed design.
+"""The PySide6 launcher window.
 
 No accounts, no login page: the window lists the worlds this machine knows
 about (from the local registry), with PLAY/STOP driving the host agent and JOIN
-showing the host's published address from the lease. R2 credentials are
-configured once (first-run dialog or R2 Settings).
+showing the host's published address from the lease. On first run it shows a
+welcome that explains the "the world stays, the host changes" idea before
+routing into the storage chooser.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from launcher.registry import WorldRegistry
 from launcher.storage import WorldStoreProtocol, build_store as build_backend
 from launcher.ui.connection_dialog import ConnectionDialog
 from launcher.ui.settings_dialog import SettingsDialog
+from launcher.ui.welcome_dialog import WelcomeDialog
 from launcher.ui.widgets import WorldCard
 
 logger = logging.getLogger(__name__)
@@ -80,10 +82,11 @@ class MainWindow(QWidget):
         self._poll.start(POLL_INTERVAL_MS)
 
         if self.store is None and prompt_settings:
-            # First-run (or missing R2 config): show the settings dialog
-            # non-modally so the app still opens; save applies on accept.
-            self._settings_dialog: QDialog | None = None
-            QTimer.singleShot(0, self._open_settings_nonmodal)
+            # First run (or missing storage): explain what Nomad is, then let
+            # the user choose where the group's world lives. Kept non-modal so
+            # the app still opens; "Not now" leaves it usable read-only.
+            self._welcome_dialog: WelcomeDialog | None = None
+            QTimer.singleShot(0, self._open_welcome)
 
     # --- UI -------------------------------------------------------------
 
@@ -98,7 +101,7 @@ class MainWindow(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        settings_button = QPushButton("R2 Settings…")
+        settings_button = QPushButton("Storage…")
         settings_button.clicked.connect(self._prompt_settings)
         header.addWidget(settings_button)
 
@@ -179,7 +182,9 @@ class MainWindow(QWidget):
         if not vok or not version.strip():
             return
         world = self.registry.add(name.strip(), version.strip())
-        self.status_message.emit(f"Created '{world['name']}'. Press PLAY to start it.")
+        self.status_message.emit(
+            f"Created '{world['name']}'. Share this World ID with friends: {world['id']}"
+        )
         self.worlds_changed.emit()
 
     def _on_play(self, world: dict) -> None:
@@ -201,7 +206,7 @@ class MainWindow(QWidget):
             try:
                 code = agent.host()
                 if code == 0:
-                    self.status_message.emit(f"{world['name']} stopped and saved to the cloud.")
+                    self.status_message.emit(f"{world['name']} stopped and saved to shared storage.")
                 else:
                     self.status_message.emit(
                         f"{world['name']}: couldn't host — is someone else hosting it?"
@@ -247,26 +252,22 @@ class MainWindow(QWidget):
         dialog.exec()
         self.worlds_changed.emit()
 
-    def _open_settings_nonmodal(self) -> None:
-        """Show the R2 settings dialog without blocking the main window."""
-        dialog = SettingsDialog(self.settings, None, parent=self)
-        dialog.accepted.connect(self._on_settings_accepted)
-        dialog.rejected.connect(self._on_settings_rejected)
-        self._settings_dialog = dialog
+    def _open_welcome(self) -> None:
+        """First-run welcome: explain Nomad, then lead into the storage chooser."""
+        dialog = WelcomeDialog(parent=self)
+        dialog.choose_storage.connect(self._start_storage_setup)
+        self._welcome_dialog = dialog
         dialog.show()
 
-    def _on_settings_accepted(self) -> None:
-        self.store = build_store(self.settings)
-        self.worlds_changed.emit()
-        self._refresh_statuses()
-
-    def _on_settings_rejected(self) -> None:
-        # User skipped configuration; the app remains usable read-only.
-        self.store = build_store(self.settings)
-        self._refresh_statuses()
+    def _start_storage_setup(self) -> None:
+        """Dismiss the welcome and open the storage chooser."""
+        if self._welcome_dialog is not None:
+            self._welcome_dialog.close()
+            self._welcome_dialog = None
+            self._prompt_settings()
 
     def _prompt_settings(self) -> None:
-        """Blocking settings dialog (used from the R2 Settings button)."""
+        """Blocking storage chooser (from the welcome dialog or Storage button)."""
         dialog = SettingsDialog(self.settings, None, parent=self)
         dialog.exec()
         self.store = build_store(self.settings)

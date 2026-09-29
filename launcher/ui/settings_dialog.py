@@ -57,9 +57,9 @@ class SettingsDialog(QDialog):
 
         root = QVBoxLayout(self)
         intro = QLabel(
-            "Worlds and the host lease live in a shared store. Choose one backend. "
-            "R2: create a bucket at dash.cloudflare.com. Git: a repo you can push to. "
-            "VPS: your own S3-compatible server (MinIO)."
+            "Your group's shared world lives in one place. Everyone points at the "
+            "same place, and whoever presses Play runs Minecraft on their own PC. "
+            "Pick where the world should be stored:"
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color: #9aa1b5;")

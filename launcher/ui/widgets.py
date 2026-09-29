@@ -105,18 +105,36 @@ class WorldCard(QFrame):
             "unknown": "#f26d6d",
         }
         color = colors.get(status, "#9aa1b5")
-        self.status_label.setText(f"● {status.upper()}")
+        self.status_label.setText(self._status_text())
         self.status_label.setStyleSheet(f"color: {color}; font-weight: 600;")
-
-        if self._is_host:
-            host_text = "YOU"
-        elif self._holder:
-            host_text = self._holder
-        else:
-            host_text = "—"
-        self.meta_label.setText(f"Host: {host_text}")
-
+        self.meta_label.setText(self._meta_text())
         self._update_action()
+
+    def _status_text(self) -> str:
+        if self._status == "hosting":
+            return "● You are hosting" if self._is_host else "● Hosting by %s" % (
+                self._holder or "someone"
+            )
+        word = {
+            "sleeping": "Sleeping",
+            "starting": "Starting…",
+            "stopping": "Stopping…",
+            "unknown": "Unreachable",
+        }.get(self._status, self._status.capitalize())
+        return f"● {word}"
+
+    def _meta_text(self) -> str:
+        return {
+            "sleeping": "No one is hosting right now. Press PLAY to start the world.",
+            "starting": "Loading the world and starting Minecraft…",
+            "stopping": "Saving the world back to shared storage…",
+            "unknown": "Nomad can't reach the shared storage.",
+            "hosting": (
+                "You are running this world on your PC."
+                if self._is_host
+                else "%s is running this world on their PC." % (self._holder or "Someone")
+            ),
+        }.get(self._status, "")
 
     def _update_action(self) -> None:
         if self._action_connected:
