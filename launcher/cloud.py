@@ -191,7 +191,11 @@ class S3Client:
         request = urllib.request.Request(url, data=body, method=method, headers=final_headers)
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
-                return response.status, dict(response.headers), response.read()
+                # HTTP header names are case-insensitive (RFC 9110) but servers
+                # vary: SeaweedFS returns ETag on PUT and Etag on GET. Lowercase
+                # them so lookups like .get("etag") work regardless of sender.
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                return response.status, headers, response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise CloudError(exc.code, detail[:500]) from exc

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 
-from launcher.cloud import LeaseError, UsageCounter, WorldStore
+from launcher.cloud import LeaseError, S3Client, UsageCounter, WorldStore
 from launcher.tests.fake_s3 import FakeS3Client, lease_body
 
 
@@ -186,3 +188,50 @@ def test_usage_counter_tracks_operations(tmp_path: Path) -> None:
     # Counters persist across instances.
     usage2 = UsageCounter(tmp_path / "usage.json")
     assert usage2.snapshot()["world_count"] == 1
+
+
+def test_etag_header_casing_is_ignored() -> None:
+    """HTTP response header names are case-insensitive (RFC 9110), but real
+    S3 stores vary: SeaweedFS returns ``ETag`` on PUT and ``Etag`` on GET.
+    Lease CAS depends on the returned etag, so a case-sensitive lookup
+    (``.get("etag")`` over ``dict(response.headers)``) silently yields ``""``,
+    turning every renew/release into an unconditional overwrite. This must not
+    regress. Spin up a real HTTP server that sends the mixed casing."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _respond(self) -> None:
+            payload = b'{"status":"active","holder":"alice"}'
+            self.send_response(200)
+            # SeaweedFS's actual behaviour: differ the header casing by method.
+            self.send_header("Etag" if self.command == "GET" else "ETag", '"2f8bb70a9fa97314f9141b082e24f10c"')
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            self._respond()
+
+        def do_PUT(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            self._respond()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        client = S3Client(f"http://127.0.0.1:{port}", "access", "secret", "bucket")
+
+        body, etag = client.get_object_etag("worlds/1/lease.json")
+        assert etag == '"2f8bb70a9fa97314f9141b082e24f10c"'
+
+        etag = client.put_object("worlds/1/lease.json", body)
+        assert etag == '"2f8bb70a9fa97314f9141b082e24f10c"'
+    finally:
+        server.shutdown()
+        server.server_close()
