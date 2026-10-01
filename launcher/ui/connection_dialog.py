@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from launcher.ui import theme
+
 
 class ConnectionDialog(QDialog):
     def __init__(
@@ -27,9 +29,12 @@ class ConnectionDialog(QDialog):
         self.direct_address = direct_address
 
         self.setWindowTitle(f"Join {world.get('name', 'World')}")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 18, 20, 16)
+        root.setSpacing(10)
+
         intro = QLabel(
             f"<b>{world.get('name', 'World')}</b> is hosted by "
             f"{holder or 'another player'}."
@@ -38,19 +43,19 @@ class ConnectionDialog(QDialog):
         root.addWidget(intro)
 
         body = QLabel(
-            "Open your Minecraft client and connect to the address below "
-            "(multiplayer → direct connect). Use the same Minecraft version "
-            "as the world."
+            "Open Minecraft, choose Multiplayer → Direct Connection, and enter "
+            "the address below. Use the same Minecraft version as the world."
         )
         body.setWordWrap(True)
+        body.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         root.addWidget(body)
 
         row = QHBoxLayout()
         label = QLabel(direct_address)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setStyleSheet(
-            "font-family: monospace; font-size: 14px; background: #232738;"
-            "padding: 8px; border-radius: 6px;"
+            f"font-family: {theme.MONO}; font-size: 14px; background: {theme.BG_ELEVATED};"
+            f"padding: 8px; border-radius: {theme.RADIUS_SMALL}px;"
         )
         row.addWidget(label, stretch=1)
         copy = QPushButton("Copy")
@@ -59,5 +64,6 @@ class ConnectionDialog(QDialog):
         root.addLayout(row)
 
         close = QPushButton("Close")
+        close.setObjectName("primary")
         close.clicked.connect(self.accept)
         root.addWidget(close, alignment=Qt.AlignRight)

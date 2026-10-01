@@ -26,16 +26,15 @@ def test_record_writes_provenance_without_secrets(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     audit.configure(settings)
     audit.record(
-        "acquire", backend="ssh", target="nomad@box", key="SHA256:abc", world="w1", outcome="ok"
+        "acquire", backend="r2", target="bucket", world="w1", outcome="ok"
     )
 
     log = tmp_path / "logs" / "audit.log"
     assert log.exists()
     text = log.read_text(encoding="utf-8")
     assert "action=acquire" in text
-    assert "backend=ssh" in text
-    assert "target=nomad@box" in text
-    assert "key=SHA256:abc" in text
+    assert "backend=r2" in text
+    assert "target=bucket" in text
     assert "world=w1" in text
 
 
@@ -61,45 +60,18 @@ def test_audit_file_is_owner_only(tmp_path: Path) -> None:
     assert (log.stat().st_mode & 0o777) == 0o600
 
 
-def test_ssh_store_records_acquire_and_release(tmp_path: Path) -> None:
-    from launcher.storage.ssh import SshWorldStore
+def test_store_records_acquire_and_release(tmp_path: Path) -> None:
+    from launcher.cloud import WorldStore
 
-    class _FakeRemote:
-        def __init__(self) -> None:
-            self.dirs: set[str] = set()
-            self.files: dict[str, bytes] = {}
-
-        def mkdir(self, remote: str) -> bool:
-            if remote in self.dirs:
-                return False
-            self.dirs.add(remote)
-            return True
-
-        def read(self, remote: str):
-            return self.files.get(remote)
-
-        def write(self, remote: str, data: bytes) -> None:
-            self.files[remote] = data
-
-        def remove_tree(self, remote: str) -> None:
-            self.dirs = {d for d in self.dirs if not d.startswith(remote)}
-            self.files = {k: v for k, v in self.files.items() if not k.startswith(remote)}
-
-        def exists(self, remote: str) -> bool:
-            return remote in self.dirs or remote in self.files
-
-        def push_file(self, local, remote):
-            pass
-
-        def pull_file(self, remote, local):
-            return False
+    from launcher.tests.fake_s3 import FakeS3Client
 
     audit.configure(_settings(tmp_path))
-    store = SshWorldStore(_FakeRemote(), base="/srv/nomad", player_name="alice")
+    store = WorldStore(FakeS3Client(), player_name="alice", backend="r2")
     lease = store.acquire("w1")
     store.release("w1", lease)
 
     text = (tmp_path / "logs" / "audit.log").read_text(encoding="utf-8")
     assert "action=acquire" in text
     assert "action=release" in text
+    assert "backend=r2" in text
     assert "world=w1" in text

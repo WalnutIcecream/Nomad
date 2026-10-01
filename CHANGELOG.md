@@ -8,7 +8,54 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Inclusion manifest (`nomad.json`): a pointer file listing the files and
+- Guided storage wizard for the two supported backends: **Cloudflare R2** and
+  **My own server** (an S3-compatible server you run yourself, such as Garage on
+  a VPS or home box). It is a step-by-step flow with a **Test Connection** step
+  that writes, reads back and deletes a small probe object, and only saves after
+  the storage has actually been proven to work.
+- Human-readable storage errors. Instead of `ECONNREFUSED 10.0.0.12:3900`, the
+  app says what happened and what to check (permissions, bucket name, server
+  reachability), with the raw error kept behind "View technical details".
+- Credentials are stored in the operating system keychain when one is available
+  (macOS Keychain, Windows Credential Manager, Secret Service), and fall back to
+  the `0600` settings file otherwise. Opt in to `keyring` with the `secure`
+  extra; disable entirely with `NOMAD_KEYCHAIN=0`.
+- `nomad storage test` verifies the configured storage from the command line.
+- Redesigned launcher UI on a real design-token theme (dark palette, status
+  colours, spacing): world cards with clear states (Ready, Starting, Hosting,
+  Someone is hosting, Syncing, Stopping, Offline, Storage unavailable, Error), a
+  per-world menu (rename, delete, copy World ID), a Create World form, and a
+  **Join a world** flow by World ID — which previously existed only in the CLI.
+
+### Changed
+
+- The product exposes exactly two storage choices: Cloudflare R2 and "My own
+  server" (self-hosted S3/Garage). The `vps` backend was renamed `server` and now
+  takes its own credentials (`NOMAD_SERVER_ENDPOINT`, `NOMAD_SERVER_BUCKET`,
+  `NOMAD_SERVER_ACCESS_KEY`, `NOMAD_SERVER_SECRET_KEY`) rather than borrowing the
+  R2 keys.
+- The host agent narrates its phases (starting, pulling, booting, hosting,
+  stopping, syncing, releasing) so the UI can show truthful states instead of a
+  single "hosting" flag.
+- Lease operations are now recorded in the audit trail for the S3 backends, not
+  just the removed SSH backend.
+
+### Fixed
+
+- A failed world upload no longer releases the lease. Releasing would let the
+  next host pull a world older than the copy still on disk; the lease is now
+  preserved and allowed to expire, and the user is told their local copy is
+  intact.
+
+### Removed
+
+- The git storage backend and the SSH storage backend, plus their supporting
+  modules (`launcher/storage/git.py`, `launcher/storage/ssh.py`,
+  `launcher/ssh_connection.py`, `launcher/ssh_identity.py`,
+  `launcher/ssh_provision.py`, `launcher/tunnel.py`), the SSH setup dialog, and
+  the `nomad ssh` commands. `NOMAD_GIT_*` and `NOMAD_SSH_*` are gone.
+
+
   directories to sync, the inclusion counterpart to `.gitignore`. Adds
   `include` / `exclude` glob patterns and an optional `server.command` block.
 - Generic server runtime (`ProcessRuntime`) so any game server with a save

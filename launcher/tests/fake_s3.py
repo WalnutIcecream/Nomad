@@ -70,6 +70,9 @@ class FakeS3Client(S3Client):
         self.objects[key] = (body, etag)
         return etag
 
+    def delete_object(self, key: str) -> None:
+        self.objects.pop(key, None)
+
     def status_objects(self) -> dict[str, bytes]:
         return {k: v[0] for k, v in self.objects.items()}
 

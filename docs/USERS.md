@@ -125,116 +125,87 @@ World ID *and* access to that same shared storage.
 
 ## Choosing storage: "Where should your shared world live?"
 
-The world has to live somewhere everyone can reach. Nomad gives you four
-choices. You pick one; it only really matters to the person setting it up.
+The world has to live somewhere everyone can reach. Nomad gives you two choices.
+You pick one; it only really matters to the person setting it up.
 
 | Option | Plain English | Best for |
 |---|---|---|
-| **Cloudflare R2** | The world lives in a free-tier cloud bucket. | Most groups; friends anywhere on the internet. |
-| **Git** | The world lives in a shared Git repository. | Smaller worlds; people who already use Git. |
-| **Your own S3-compatible server** | The world lives on a server you run (MinIO/Garage/SeaweedFS). | People who already run a box and want control. |
-| **SSH / another computer** | The world lives on a machine you already own, reached over SSH. | People who have a spare always-on machine. |
+| **Cloudflare R2** | The world lives in a free-tier cloud bucket. | Most groups; friends anywhere on the internet, and nobody has to run anything. |
+| **My own server** | The world lives on an S3-compatible server you run yourself (Garage), on a VPS or home machine. | People who already run a server and want to keep their world on their own hardware. |
+
+Whichever you choose, Nomad's setup wizard walks you through it and **tests the
+connection before saving**, so you find out immediately if a value is wrong
+rather than the first time you press Play.
 
 ### Cloudflare R2
 
-> "Put your world in a Cloudflare R2 bucket. This is the simplest cloud option."
+> "Put your world in a Cloudflare R2 bucket. This is the simplest option."
 
 - **Who should use it:** most groups — it requires no server to run and friends
   can connect from anywhere.
 - **Setup requires:** a free Cloudflare account, a bucket, and an API token;
-  then paste four values into Nomad's settings.
+  then the wizard asks for the account ID, keys and bucket.
 - **Limitations:** usage is metered against a free tier (roughly 10 GB in
-  storage and short monthly operation budgets). Right at friends-scale use this
-  is usually far under the limit.
+  storage and short monthly operation budgets). At friends-scale use this is
+  usually far under the limit.
 
-### Git
+### My own server
 
-> "Use a shared Git repository as the world store. Best for smaller worlds and
-> people who already use Git."
+> "Store your world on a server you run yourself."
 
-- **Who should use it:** small worlds, and groups that already have a shared Git
-  repo.
-- **Setup requires:** a repo (locally, or a remote you can push to), entered in
-  Nomad's settings.
-- **Limitations:** Git rejects single files over **100 MB**, and every save adds
-  a full copy of the world to the repo's history, so a long-lived world grows
-  the repo. Great for tiny saves, not for huge ones.
+- **Who should use it:** people who already operate a server (or a home machine)
+  and prefer to keep their world on their own hardware.
+- **Setup requires:** one person installs an S3-compatible service — **Garage**
+  is the supported one — creates a bucket (for example `nomad-worlds`), and
+  mints an access key. Then each player enters four values: **endpoint, bucket,
+  access key, secret key**, and presses **Test Connection**.
+- **Limitations:** the machine must stay reachable, and storage and bandwidth
+  come out of its resources.
 
-### Your own S3-compatible server (VPS)
-
-> "Use your own MinIO/Garage/SeaweedFS server."
-
-- **Who should use it:** people who already operate a server and prefer to host
-  their own data.
-- **Setup requires:** one person installs MinIO (or similar), creates a bucket
-  and a key, and shares three values (endpoint, bucket, credentials).
-- **Limitations:** the box must stay reachable; storage and bandwidth come out
-  of that box's resources.
-
-### SSH / another computer you already own
-
-> "Use another machine you already own as the place where Nomad stores the
-> shared world. You only need SSH access to that machine."
-
-See the SSH section below for a proper walkthrough — it is the friendliest of
-the "own machine" options because Nomad sets most of it up for you.
+The server holds the world; it does **not** run Minecraft. The player's own
+computer runs the game, exactly as with R2.
 
 ---
 
-## SSH storage, explained
+## My own server, explained
 
-SSH storage answers the question: **"Where is my persistent world stored?"**
+This answers the question: **"Where is my persistent world stored?"**
 
-It means "I already own a computer that's on most of the time, and I'll let
-Nomad store the group's world on it." That machine does **not** run Minecraft —
-it only holds the files. It is the *shared storage*.
+It means "I already own a server that's on most of the time, and I'll let Nomad
+store the group's world on it." That machine does **not** run Minecraft — it only
+holds the files. It is the *shared storage*.
 
 ```text
-        STORAGE MACHINE
-        +-------------+
-        | SSH server  |
-        |             |
-        | Nomad worlds|
-        +------+------+
-               |
-              SSH
-               |
-        +------+------+
-        |             |
-      Alice          Bob
-      Nomad          Nomad
+        STORAGE SERVER (Garage)
+        +---------------------+
+        |  S3 API             |
+        |                     |
+        |  nomad-worlds       |
+        +----------+----------+
+                   |
+                S3 API
+                   |
+        +----------+----------+
+        |                     |
+      Alice                  Bob
+      Nomad                  Nomad
+      (Minecraft)            (Minecraft)
 ```
 
-That machine holds:
+That server holds the world archive, the lease (who is hosting), and the
+checksum. Anyone with access to that bucket can host or join the same world.
 
-- **the world** (the `.tar.gz` archive),
-- **the lease** (who is hosting, see Layer 2),
-- **the shared Nomad data** that lets the group coordinate.
+Nomad never configures Garage for you. Garage is server-side infrastructure: the
+administrator installs it, enables its S3 API, creates the bucket and the key,
+and hands out the four values above. The wizard has a "How do I set this up?"
+section that says exactly this, so you can forward it to whoever runs the box.
 
-Anyone with access to that machine can host or join the same world.
+If you are that administrator, the steps are:
 
-### Setting up SSH storage
-
-The way it is meant to be done — no terminal, no SSH-key knowledge required:
-
-1. Have a machine reachable over SSH (an address like `192.168.1.20` or a
-   hostname, plus a username).
-2. Open Nomad.
-3. Choose **"Set up over SSH"**.
-4. Enter `user@host` (the username and address).
-5. Nomad **generates and configures** the SSH key for you.
-6. Nomad **verifies** the connection works.
-7. Storage is ready.
-
-You do **not** normally need to understand SSH keys, `authorized_keys`, remote
-paths, or ports. Nomad handles all of that automatically — it only asks for the
-one thing it can't know: the machine's address. If the automatic setup ever
-fails, Nomad shows the exact one-line command you can run instead, with a copy
-button.
-
-> The manual, advanced way to configure SSH (a dedicated user, custom keys,
-> scoped access) is preserved in the Advanced section at the bottom. You almost
-> certainly don't need it.
+1. Install Garage on a Linux server and enable its S3 API.
+2. Create a bucket for the worlds (for example `nomad-worlds`).
+3. Mint an access key and secret for Nomad.
+4. Share the endpoint, bucket, access key and secret key with your players.
 
 ---
 
@@ -321,9 +292,8 @@ These are two separate things.
                       v
                  Networking
                       |
-              +-------+-------+
-              |               |
-          Direct/LAN       Relay/Tunnel
+                      v
+             the host's address
 ```
 
 > Nomad decides **who** is hosting. The networking layer makes **that host
@@ -336,103 +306,14 @@ forwards the game port (or the host published a public address) — friends join
 the host's address directly. This is the simplest case and the default. It needs
 no extra setup beyond the host publishing an address.
 
-### SSH tunneling (for a host stuck behind NAT)
+### When the host can't be reached directly
 
-Sometimes the host's PC is behind NAT/CGNAT or a restrictive router, so friends
-on the internet can't reach it directly — even though *that PC* can still make
-**outgoing** connections. Tunneling answers a completely different question from
-SSH storage:
-
-> **SSH STORAGE:** "Where do I store the world?"
-> **SSH TUNNEL:** "How can my friends connect to the Minecraft server running on my PC?"
-
-```text
-                 INTERNET
-                    |
-                    v
-              SSH / VPS BOX
-              public address
-                    |
-              SSH reverse tunnel
-                    |
-                    v
-               MY PC
-                    |
-                    v
-             Minecraft :25565
-```
-
-With a tunnel, Nomad opens a secure connection **from your PC out to a box that
-has a public address**, and publishes the game through it. Friends connect to
-that box's address, and the tunnel carries the traffic straight to your
-Minecraft.
-
-- This is useful only when the **host** can't be reached directly.
-- It does **not** come free with SSH storage — they are separate features.
-  Using SSH *storage* does **not** automatically make the Minecraft server
-  publicly reachable.
-
-**How to enable it:** either pass `--tunnel` when you play, or turn on "Publish
-the game port through this host (reverse tunnel)" in the SSH settings. You need
-an SSH box that allows forwarding (the remote side needs `AllowTcpForwarding yes`
-and, to reach the public internet, `GatewayPorts yes`).
-
-### Managed relay / provider (conceptual, coming later)
-
-In the future Nomad may also support a **managed relay**: a service that holds a
-stable public endpoint for the group. When the host changes, Nomad updates which
-machine that endpoint points to, so friends keep using the **same address**:
-
-```text
-Alice hosts                 Alice leaves                Bob hosts
-     |                            |                        |
-     v                            v                        v
-Public endpoint -> Alice    (world saved)       Public endpoint -> Bob
-```
-
-Players continue using the same public endpoint the whole time. This is a
-planned/optional integration — it is **not yet implemented** in the current
-version of Nomad.
-
----
-
-## Hybrid hosting (conceptual, coming later)
-
-Nomad's future hosting model lets the *world* stay the same while the *machine
-running it* is chosen automatically. Two kinds of "compute" can host:
-
-```text
-                      NOMAD
-                      |
-             Where should it run?
-                /           \
-               /             \
-        PLAYER PC          CLOUD
-        compute            compute
-           |                 |
-           +--------+--------+
-                    |
-               SAME WORLD
-                    |
-                 PLAYERS
-```
-
-The intended experience:
-
-- If a player **can** host on their PC, the world runs on their PC (free).
-- If **nobody suitable** can host, a cloud server can run it instead.
-- The world is the same either way — only the machine running Minecraft changes.
-
-Potential modes (this is a design sketch, **not implemented yet**):
-
-- **Self-hosted** — players provide the computer; you pay only for networking /
-  tunneling if you need it.
-- **Hybrid** — prefer player PCs, fall back to cloud hosting when necessary;
-  cloud is billed only while it's actually in use.
-- **Cloud** — always run on cloud compute.
-
-Right now Nomad runs only on player PCs. The cloud-host concept is documented
-here so the user experience is ready for it.
+If the host is behind NAT or a restrictive router, friends on the internet can't
+reach that PC directly. Nomad does not try to solve this for you: it uses
+whatever the project already uses for Minecraft networking. The reliable fixes
+are on your side — forward the game port on the router and set
+`NOMAD_PUBLIC_ADDRESS` to that `host:port`, or host on a machine that is already
+reachable.
 
 ---
 
@@ -482,20 +363,27 @@ is only joining just needs pull access — they never download or host anything.
 The full host session is a fixed sequence:
 
 ```
-1. connect to storage
-2. (optional) start reverse tunnel
-3. acquire the lease          -> if someone else holds it: "Join" instead
-4. pull latest world, verify  -> or start fresh if there is none yet
-5. resolve how to run:
+1. acquire the lease          -> if someone else holds it: "Join" instead
+2. pull latest world, verify  -> or start fresh if there is none yet
+3. resolve how to run:
      nomad.json manifest?  -> run its command (any game)
      otherwise             -> vanilla Minecraft runtime
-6. renew the lease every 20s while the server runs
-7. on stop: shut server down, tar the world, upload it, then release the lease
+4. renew the lease every 20s while the server runs
+5. on stop: shut server down, tar the world, upload it, then release the lease
 ```
+
+The launcher shows each step as it happens — Ready, Starting, Hosting, Stopping,
+Syncing, then Ready again — so you can always tell what the world is doing.
 
 On **any** error or early exit, Nomad releases the lease if it still holds it
 (expiry frees it if even the release fails). The world is never held hostage by
 a crashed host.
+
+The one deliberate exception is a **failed upload**. If the world can't be saved
+back to shared storage, Nomad does **not** release the lease — releasing would
+let the next host pull a world older than the copy still on your disk. Instead it
+tells you the sync failed and that your local copy is intact, and the lease
+expires on its own a few minutes later.
 
 ## The vanilla Minecraft runtime
 
@@ -548,29 +436,23 @@ nomad manifest check ./my-server    # preview what would sync
 ## Configuration
 
 Settings come from (highest priority first): **OS environment variables** >
-`data/settings.json` (written by the GUI) > `.env` > built-in defaults.
-Credentials are stored encrypted-at-rest only via filesystem permissions and are
+`data/settings.json` (written by the wizard) > `.env` > built-in defaults.
+Storage secrets go to your **operating system keychain** when one is available,
+and otherwise to `settings.json` (`0600`, owner-only). Either way they are
 redacted from all logs.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `NOMAD_STORAGE_BACKEND` | `r2` | `r2` \| `git` \| `vps` \| `ssh` |
+| `NOMAD_STORAGE_BACKEND` | `r2` | `r2` \| `server` |
 | `NOMAD_R2_ACCOUNT_ID` | — | R2 endpoint construction |
 | `NOMAD_R2_ACCESS_KEY` / `NOMAD_R2_SECRET_KEY` | — | SigV4 signing |
 | `NOMAD_R2_BUCKET` | — | R2 bucket |
-| `NOMAD_R2_ENDPOINT_URL` | auto | override S3 endpoint |
-| `NOMAD_GIT_REPO` | `~/.nomad/repo` | git backend repo path |
-| `NOMAD_GIT_REMOTE` | — | git backend remote URL |
-| `NOMAD_VPS_ENDPOINT` | — | VPS S3 endpoint |
-| `NOMAD_VPS_BUCKET` | — | VPS bucket |
-| `NOMAD_SSH_TARGET` | — | ssh storage: `user@host` |
-| `NOMAD_SSH_PATH` | `nomad-worlds` | ssh storage: remote base dir |
-| `NOMAD_SSH_KEY` | — | ssh storage: identity file |
-| `NOMAD_SSH_PORT` | `22` | ssh storage: port |
-| `NOMAD_SSH_REVERSE_TUNNEL` | `false` | publish the game port through the ssh host |
-| `NOMAD_SSH_REMOTE_PORT` | server port | remote port to bind for the tunnel |
-| `NOMAD_SSH_REMOTE_HOST` | ssh host | address published in the lease for the tunnel |
-| `NOMAD_AUDIT_LOG` | `1` | write the non-secret credential-use audit trail |
+| `NOMAD_R2_ENDPOINT_URL` | auto | override the R2 S3 endpoint |
+| `NOMAD_SERVER_ENDPOINT` | — | your own server's S3 endpoint |
+| `NOMAD_SERVER_BUCKET` | — | your own server's bucket |
+| `NOMAD_SERVER_ACCESS_KEY` / `NOMAD_SERVER_SECRET_KEY` | — | your own server's credentials |
+| `NOMAD_KEYCHAIN` | `1` | `0` forces credentials into the settings file |
+| `NOMAD_AUDIT_LOG` | `1` | write the non-secret lease/credential-use audit trail |
 | `NOMAD_DATA_DIR` | platform default | launcher state, worlds, registry |
 | `NOMAD_PLAYER_NAME` | env username | holder name shown in the lease ("the host") |
 | `NOMAD_PUBLIC_ADDRESS` | — | LAN/port-forwarded address to publish in the lease |
@@ -585,68 +467,40 @@ redacted from all logs.
 ## CLI reference
 
 ```bash
-nomad storage set r2|git|vps|ssh    # select a storage backend
+nomad storage set r2|server         # select where worlds are stored
 nomad storage status                # active backend + settings (secrets redacted)
-nomad ssh setup <user@host>         # guided: install key, create folder, verify
-nomad ssh init                      # generate the Nomad key; print dedicated-user steps
-nomad ssh show                      # target, identity, fingerprint, tunnel state
+nomad storage test                  # prove the storage can read and write
 nomad manifest init [dir]           # write a starter nomad.json
 nomad manifest check [dir]          # preview what the manifest syncs
 nomad new <name>                    # create a world; prints its id
 nomad join <world-id>               # add a friend's world by id
 nomad play <world-id>               # host until Ctrl-C; pushes world on stop
-nomad play <world-id> --tunnel      # also publish the game port through NOMAD_SSH_TARGET
 nomad status <world-id>             # who hosts now
 nomad worlds                        # list worlds with live host status
 nomad usage                         # approximate local usage counters
 ```
 
-Environment setup: `python -m pip install -e ".[dev]"` (core + tests) or
-`python -m pip install -e ".[ui]"` (adds the PySide6 GUI). Requires Python
-≥ 3.11 and Java 21 to host.
+Environment setup: `python -m pip install -e ".[dev]"` (core + tests),
+`python -m pip install -e ".[ui]"` (adds the PySide6 GUI), or
+`python -m pip install -e ".[ui,secure]"` (adds OS-keychain credential storage).
+Requires Python ≥ 3.11 and Java 21 to host.
 
-## Advanced: manual SSH configuration
+## Advanced: editing the raw connection values
 
-The guided setup covers almost everyone. The manual/advanced pieces, for custom
-layouts:
-
-- **Identity.** Nomad keeps its own ed25519 keypair at
-  `data/ssh/id_ed25519_nomad` (`0600` in a `0700` dir) so it never depends on
-  your `~/.ssh` layout. Key resolution: `NOMAD_SSH_KEY` if set, else the Nomad
-  key if it exists, else the system ssh default.
-- **Isolated dedicated user (print-only).** `nomad ssh init` generates the key
-  and *prints* the commands to create a scoped `useradd` user who owns only the
-  world directory. It prints commands; it does not run them.
-- **Scoped access.** Restrict the key in `authorized_keys` to a single command
-  (e.g. `rrsync` scoped to the world dir) with `no-pty,no-port-forwarding`, or
-  let the dedicated user be scoped by owning only the world directory.
-- **Remote layout.** Under `<base>/<world-id>/`, the ssh backend keeps
-  `lease/` (presence == claimed, atomic `mkdir`), `world.tar.gz`, and
-  `world.sha256`. The guarantee is the same as R2, implemented with the remote
-  filesystem's atomic `mkdir` instead of an S3 conditional write.
-- **One connection per session.** On POSIX, connections are multiplexed
-  (`ControlMaster=auto`, `ControlPersist=yes`) so the whole session costs one
-  handshake; the reverse tunnel rides the same connection. Windows OpenSSH opens
-  a connection per operation.
-
-## Advanced: tunnel configuration
-
-`ssh -N -R <remote_port>:localhost:<server_port> user@host` is opened *before*
-acquiring the lease (so the published address is real), written into the lease
-as `<remote_host>:<remote_port>`, and closed when the session ends. The remote
-`sshd` needs `AllowTcpForwarding yes` (default) and, to bind a non-loopback
-address, `GatewayPorts yes`. `ExitOnForwardFailure=yes` makes a failed bind abort
-at startup instead of silently continuing.
+The wizard is the normal path, but **Settings → Storage → Advanced** exposes the
+raw values for the active backend — endpoint, bucket, access key, secret key —
+with a **Test connection** button, for people who would rather paste env-style
+values than step through a wizard.
 
 ## Security
 
 - Credentials are `SecretStr`; every log record is **globally scrubbed** of
-  credential-shaped text, and any remote URL's userinfo (a token in a git URL)
-  is redacted before printing.
-- `settings.json` and the SSH key are written owner-only (`0600`/`0700`); on
-  load, a world-readable credentials file is refused (with the exact `chmod`
-  command) or tightened.
-- Opt-in **audit log** (`NOMAD_AUDIT_LOG=1`) records which credential was used
+  credential-shaped text.
+- Secrets live in the **OS keychain** when available; otherwise
+  `settings.json` is written owner-only (`0600`/`0700`), and on load a
+  world-readable credentials file is refused (with the exact `chmod` command) or
+  tightened.
+- Opt-in **audit log** (`NOMAD_AUDIT_LOG=1`) records which lease action happened
   and when — the *non-secret* facts, so debugging never leaks the secrets.
 - Integrity: the world archive is **SHA-256** verified on every download, and
   archives are extracted safely (symlinks/hardlinks rejected, path-escape
@@ -657,6 +511,8 @@ at startup instead of silently continuing.
 - **`nomad config`** — current backend, readiness, player name, published address.
 - **`nomad storage status`** — active backend, its settings (redacted), and a
   `ready: yes/no` check.
+- **`nomad storage test`** — writes, reads back and deletes a probe object, to
+  prove the credentials and bucket really work.
 - **`nomad worlds` / `nomad status <id>`** — who hosts a world right now.
 - **`nomad usage`** — approximate local usage counters (uploads, downloads, API
   requests) to gauge against the free tier. It is a *local estimate*; the
@@ -664,19 +520,17 @@ at startup instead of silently continuing.
 
 ## Troubleshooting
 
+- **"Storage unavailable" / "Nomad couldn't access this bucket"** → press
+  **Test connection** in the wizard or Settings; the message says whether it is a
+  permission, bucket-name, or reachability problem, and "View technical details"
+  has the raw error.
 - **"EULA not accepted"** when hosting → `nomad play --accept-eula` once, or set
   `NOMAD_EULA_ACCEPTED=true`.
-- **"Couldn't host — is someone else hosting?"** → check `nomad status <id>`; the
-  lease is held. Join instead, or wait for it to expire.
-- **"Storage not configured"** → `nomad storage status` shows what's missing for
-  the active backend; fill it in the GUI or via env vars.
+- **"Couldn't start — someone else may be hosting"** → check `nomad status <id>`;
+  the lease is held. Join instead, or wait for it to expire.
+- **"Your world couldn't be synced"** → the upload to storage failed, so the
+  lease was kept (your local copy is safe). Check the storage is reachable, then
+  press Play again — the lease expires on its own within a few minutes.
 - **Java too old** → install or point at Java 21 (`NOMAD_JAVA_PATH`).
-- **Host behind NAT, friends can't connect** → enable the SSH `--tunnel`, or set
-  `NOMAD_PUBLIC_ADDRESS` to a port-forwarded address, or host on a box that's
-  reachable.
-- **SSH setup asks for a password every time** → it needs a one-time password to
-  install the key, then the key alone works. Run setup in a real terminal if the
-  GUI can't prompt.
-- **Git backend rejects an upload** → the blob is over Git's 100 MB per-file cap,
-  or the shared repo is stale/not a shared remote; use R2/VPS/SSH for large
-  worlds.
+- **Friends can't connect** → set `NOMAD_PUBLIC_ADDRESS` to a port-forwarded
+  address, or host on a machine that is already reachable.

@@ -1,17 +1,18 @@
 """Storage backend protocol and registry for Nomad worlds.
 
 A *backend* is anything that can answer the world-lease primitive and hold a
-world blob. There are four built-in directions:
+world blob. There are two built-in directions, and they are the only two the
+product offers:
 
-* ``r2``   -> Cloudflare R2 / any S3 endpoint (``launcher.storage.r2``)
-* ``git``  -> a git repo (mundane, free, unlimited storage) (``launcher.storage.git``)
-* ``vps``  -> your own server over S3/MinIO (``launcher.storage.vps``)
-* ``ssh``  -> a home/bare-metal box you own, over ssh (``launcher.storage.ssh``)
+* ``r2``     -> Cloudflare R2 (``launcher.storage.r2``)
+* ``server`` -> your own S3-compatible server, e.g. Garage on a VPS or home box
+  (``launcher.storage.server``)
 
 The launcher, agent and CLI talk only to the ``WorldStoreProtocol``; the
-backend is selected once via ``nomad storage set`` and its settings live in
-``LauncherSettings``. Adding a fifth direction means implementing the protocol
-and adding one entry to ``build_store`` — the rest of the app never changes.
+backend is selected once (in the storage wizard or ``nomad storage set``) and
+its settings live in ``LauncherSettings``. Adding a third direction means
+implementing the protocol and adding one entry to ``build_store`` — nothing
+else in the app changes.
 """
 
 from __future__ import annotations
@@ -19,12 +20,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from launcher.cloud import Lease, UsageCounter
+from launcher.cloud import ConnectionResult, Lease, UsageCounter
+
+# User-facing provider metadata. "server" is deliberately presented as a person
+# would say it ("My own server"), never as "Generic S3".
+PROVIDERS: dict[str, str] = {
+    "r2": "Cloudflare R2",
+    "server": "My own server",
+}
+
+
+def provider_label(backend: str) -> str:
+    """Human name for a backend id, for messages and UI labels."""
+    return PROVIDERS.get(backend, backend)
 
 
 @runtime_checkable
 class WorldStoreProtocol(Protocol):
-    """The storage contract every backend (r2, git, vps, ssh) must satisfy."""
+    """The storage contract every backend (r2, server) must satisfy."""
 
     name: str
 
@@ -52,6 +65,10 @@ class WorldStoreProtocol(Protocol):
         """Store the world blob (single per-world object, last write wins)."""
         ...
 
+    def test_connection(self) -> ConnectionResult:
+        """Verify the storage is reachable and writable before saving it."""
+        ...
+
 
 def build_store(settings, usage: UsageCounter | None = None) -> WorldStoreProtocol:
     """Construct the configured storage backend from launcher settings."""
@@ -60,19 +77,21 @@ def build_store(settings, usage: UsageCounter | None = None) -> WorldStoreProtoc
         from launcher.storage.r2 import R2WorldStore
 
         return R2WorldStore.build(settings, usage=usage)
-    if backend == "git":
-        from launcher.storage.git import GitWorldStore
+    if backend == "server":
+        from launcher.storage.server import ServerWorldStore
 
-        return GitWorldStore.build(settings, usage=usage)
-    if backend == "vps":
-        from launcher.storage.vps import VpsWorldStore
-
-        return VpsWorldStore.build(settings, usage=usage)
-    if backend == "ssh":
-        from launcher.storage.ssh import SshWorldStore
-
-        return SshWorldStore.build(settings, usage=usage)
-    raise ValueError(f"unknown storage backend: {backend!r}")
+        return ServerWorldStore.build(settings, usage=usage)
+    raise ValueError(
+        f"unknown storage backend: {backend!r} (expected one of: {', '.join(PROVIDERS)})"
+    )
 
 
-__all__ = ["WorldStoreProtocol", "build_store", "Lease", "UsageCounter"]
+__all__ = [
+    "WorldStoreProtocol",
+    "build_store",
+    "provider_label",
+    "PROVIDERS",
+    "ConnectionResult",
+    "Lease",
+    "UsageCounter",
+]

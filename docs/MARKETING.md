@@ -12,8 +12,8 @@ A shared cloud folder holds the world and a "who is hosting" marker. First to cl
 
 ## What you need
 
-- A free Cloudflare R2 bucket (or a git repo, or your own server).
-- One file with three values.
+- A free Cloudflare R2 bucket, or your own S3-compatible server (Garage).
+- Your storage details, entered once. Nomad tests the connection before saving.
 - That's it.
 
 ## Why it's different

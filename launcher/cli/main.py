@@ -2,7 +2,7 @@
 
 Commands:
     nomad config                 show current settings
-    nomad storage set|status     choose/inspect the storage backend
+    nomad storage set|status|test  choose/inspect/verify the storage backend
     nomad manifest init|check    author/preview the inclusion manifest
     nomad worlds                 list worlds in the local registry
     nomad new <name>             create a world in the local registry
@@ -20,16 +20,19 @@ import sys
 from pathlib import Path
 
 from launcher.config import LauncherSettings, load_settings_file
+from launcher.storage import PROVIDERS, provider_label
 
 
 def build_parser() -> argparse.ArgumentParser:
     from launcher import __version__
 
-    parser = argparse.ArgumentParser(prog="nomad", description="Distributed Minecraft hosting via pluggable storage")
+    parser = argparse.ArgumentParser(
+        prog="nomad", description="Distributed Minecraft hosting over your own object storage"
+    )
     parser.add_argument("--version", action="version", version=f"nomad {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("config", help="show current R2 settings")
+    subparsers.add_parser("config", help="show current storage settings")
 
     subparsers.add_parser("worlds", help="list worlds in the local registry")
 
@@ -44,16 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     play = subparsers.add_parser("play", help="host a world until stopped (Ctrl-C to stop)")
     play.add_argument("world_id", help="world id")
     play.add_argument("--accept-eula", action="store_true", help="agree to the Minecraft EULA")
-    play.add_argument(
-        "--tunnel",
-        action="store_true",
-        help="publish the game port through NOMAD_SSH_TARGET (no router config)",
-    )
 
     status = subparsers.add_parser("status", help="show who currently hosts a world")
     status.add_argument("world_id", help="world id")
 
-    subparsers.add_parser("usage", help="show approximate local R2 usage counters")
+    subparsers.add_parser("usage", help="show approximate local usage counters")
 
     manifest = subparsers.add_parser("manifest", help="inclusion manifest (nomad.json) tools")
     manifest_sub = manifest.add_subparsers(dest="manifest_command", required=True)
@@ -63,27 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_check = manifest_sub.add_parser("check", help="preview what the manifest syncs")
     manifest_check.add_argument("directory", nargs="?", default=".", help="server directory (default: .)")
 
-    storage = subparsers.add_parser("storage", help="choose and inspect the storage backend")
+    storage = subparsers.add_parser("storage", help="choose, inspect and verify the storage backend")
     storage_sub = storage.add_subparsers(dest="storage_command", required=True)
-    storage_set = storage_sub.add_parser("set", help="select a backend direction")
+    storage_set = storage_sub.add_parser("set", help="select where worlds are stored")
     storage_set.add_argument(
-        "backend", choices=["r2", "git", "vps", "ssh"], help="which storage direction to use"
+        "backend",
+        choices=sorted(PROVIDERS),
+        help="r2 = Cloudflare R2; server = your own S3-compatible server (Garage)",
     )
     storage_sub.add_parser("status", help="show the active backend and its settings")
-
-    ssh = subparsers.add_parser("ssh", help="manage the Nomad SSH identity")
-    ssh_sub = ssh.add_subparsers(dest="ssh_command", required=True)
-    ssh_setup = ssh_sub.add_parser(
-        "setup", help="set up a machine end to end: key, folder, verify, save"
-    )
-    ssh_setup.add_argument("target", help="user@host or host")
-    ssh_setup.add_argument("--port", type=int, default=None, help="ssh port (default 22)")
-    ssh_setup.add_argument(
-        "--folder", default="nomad-worlds", help="remote folder for world data"
-    )
-    ssh_init = ssh_sub.add_parser("init", help="generate a Nomad key and print provisioning steps")
-    ssh_init.add_argument("--user", default=None, help="remote user (default: from NOMAD_SSH_TARGET)")
-    ssh_sub.add_parser("show", help="show the identity, target and key fingerprint")
+    storage_sub.add_parser("test", help="check that the configured storage works")
 
     return parser
 
@@ -114,13 +101,6 @@ def main(argv: list[str] | None = None) -> int:
             return _new(args)
         if args.command == "join":
             return _join(args)
-        if args.command == "ssh":
-            if args.ssh_command == "setup":
-                return _ssh_setup(args)
-            if args.ssh_command == "init":
-                return _ssh_init(args)
-            if args.ssh_command == "show":
-                return _ssh_show()
         if args.command == "play":
             return _play(args)
         if args.command == "status":
@@ -137,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _storage_set(args)
             if args.storage_command == "status":
                 return _storage_status()
+            if args.storage_command == "test":
+                return _storage_test()
         parser.error("unknown command")
         return 2
     except KeyboardInterrupt:
@@ -166,7 +148,7 @@ def _store(settings: LauncherSettings):
 def _config() -> int:
     settings = _settings()
     configured = _configured(settings)
-    print(f"backend:  {settings.storage_backend}")
+    print(f"storage:  {provider_label(settings.storage_backend)} ({settings.storage_backend})")
     print(f"ready:    {'yes' if configured else 'no'}")
     print(f"player:   {settings.player_name}")
     print(f"address:  {settings.public_address or '(not published)'}")
@@ -248,20 +230,12 @@ def _play(args: argparse.Namespace) -> int:
     try:
         store = _store(settings)
     except Exception as exc:
-        print(f"Storage not configured ({settings.storage_backend}): {exc}")
+        print(f"Storage not configured ({provider_label(settings.storage_backend)}): {exc}")
         print("Run 'nomad storage status' to see what to set.")
         return 1
 
-    if args.tunnel:
-        settings.ssh_reverse_tunnel = True
-
     print(f"Hosting {world['name']}... press Ctrl-C to stop and push the world.")
-    try:
-        return HostAgent(settings, store, world).host()
-    finally:
-        close = getattr(store, "close", None)
-        if callable(close):
-            close()
+    return HostAgent(settings, store, world).host()
 
 
 def _manifest_init(args: argparse.Namespace) -> int:
@@ -320,146 +294,46 @@ def _storage_set(args: argparse.Namespace) -> int:
     settings = _settings()
     settings.storage_backend = args.backend
     save_settings_file(settings)
-    print(f"storage backend set to: {args.backend}")
-    return 0
-
-
-def _ssh_setup(args: argparse.Namespace) -> int:
-    import getpass
-    import sys
-
-    from launcher import ssh_provision
-    from launcher.config import save_settings_file
-
-    settings = _settings()
-    target = args.target.strip()
-    user, _, host = target.rpartition("@")
-    if not host:
-        host, user = target, ""
-
-    def step(message: str) -> None:
-        print(f"  {message}")
-
-    kwargs = {"folder": args.folder, "port": args.port, "on_step": step}
-    try:
-        try:
-            result = ssh_provision.run_setup(settings, host, user, **kwargs)
-        except ssh_provision.NeedPassword as exc:
-            if not sys.stdin.isatty():
-                print("This machine needs a password, but there is no terminal to ask in.")
-                print(f"ssh said: {exc.detail}")
-                print("Set up key access first, or run this command in a terminal.")
-                return 1
-            password = getpass.getpass(f"password for {target}: ")
-            result = ssh_provision.run_setup(settings, host, user, password=password, **kwargs)
-    except ssh_provision.ProvisionError as exc:
-        print(f"setup failed: {exc.detail}")
-        return 1
-
-    settings.ssh_target = result.target
-    settings.ssh_path = result.base
-    settings.ssh_port = result.port or 0
-    settings.storage_backend = "ssh"
-    save_settings_file(settings)
-
-    print()
-    print(f"target:      {result.target}")
-    print(f"remote base: {result.base}")
-    print(f"port:        {result.port or 22}")
-    print(f"fingerprint: {result.fingerprint or '(unknown)'}")
-    print(f"backend:     ssh (saved)")
-    print()
-    print("Next: 'nomad storage status' to confirm, then 'nomad play <world>'.")
-    return 0
-
-
-def _ssh_init(args: argparse.Namespace) -> int:
-    from launcher.ssh_identity import (
-        ensure_keypair,
-        fingerprint,
-        nomad_key_path,
-        provision_commands,
-        public_key,
-    )
-
-    settings = _settings()
-    key = ensure_keypair(
-        nomad_key_path(settings), comment=f"nomad@{settings.player_name or 'launcher'}"
-    )
-    pub = public_key(key)
-    user = args.user or (settings.ssh_target.split("@", 1)[0] if "@" in settings.ssh_target else "nomad")
-
-    print(f"key:         {key}")
-    print(f"fingerprint: {fingerprint(key) or '(ssh-keygen unavailable)'}")
-    print()
-    print("public key (install this on the box):")
-    print(f"  {pub}")
-    print()
-    print(f"--- run these on the box as an administrator (creates the '{user}' user) ---")
-    for line in provision_commands(user, pub, f"/home/{user}/{settings.ssh_path.strip('/')}"):
-        print(f"  {line}")
-    print()
-    print("Most users do not need any of that. 'nomad ssh setup <user@host>' installs")
-    print("this key for your existing account and creates the folder by itself.")
-    print("The steps above are only for the isolated dedicated-user layout.")
-    print()
-    print("Then point Nomad at it:")
-    print("  nomad ssh setup <user>@<box-address>")
-    return 0
-
-
-def _ssh_show() -> int:
-    from launcher.ssh_identity import fingerprint, nomad_key_path, resolve_key
-
-    settings = _settings()
-    resolved = resolve_key(settings)
-    print(f"target:      {settings.ssh_target or '(unset; set NOMAD_SSH_TARGET)'}")
-    if settings.ssh_key:
-        print(f"identity:    {settings.ssh_key} (explicit NOMAD_SSH_KEY)")
-    elif resolved:
-        print("identity:    Nomad key")
-        print(f"path:        {resolved}")
-        print(f"fingerprint: {fingerprint(nomad_key_path(settings)) or '(unknown)'}")
+    print(f"storage set to: {provider_label(args.backend)}")
+    if args.backend == "r2":
+        print("Set the R2 account id, bucket and keys, or use the launcher's setup wizard.")
     else:
-        print("identity:    system ssh default (no Nomad key yet; run 'nomad ssh init')")
-    print(f"remote base: {settings.ssh_path}")
-    print(f"tunnel:      {'on' if settings.ssh_reverse_tunnel else 'off'}")
+        print("Set NOMAD_SERVER_ENDPOINT, NOMAD_SERVER_BUCKET and the access/secret keys.")
+    print("Then verify with 'nomad storage test'.")
     return 0
 
 
 def _storage_status() -> int:
-    from launcher.secrets import redact_url
-    from launcher.storage import build_store
-
     settings = _settings()
-    print(f"backend: {settings.storage_backend}")
-    if settings.storage_backend == "ssh":
-        from launcher.ssh_identity import fingerprint, nomad_key_path, resolve_key
-
-        print(f"  target:   {settings.ssh_target or '(unset; set NOMAD_SSH_TARGET)'}")
-        print(f"  path:     {settings.ssh_path}")
-        resolved = resolve_key(settings)
-        if settings.ssh_key:
-            print(f"  key:      {settings.ssh_key} (explicit NOMAD_SSH_KEY)")
-        elif resolved:
-            print(f"  key:      Nomad key ({fingerprint(nomad_key_path(settings)) or 'fingerprint unavailable'})")
-        else:
-            print("  key:      (system ssh identity)")
-    elif settings.storage_backend == "git":
-        print(f"  repo:     {settings.git_repo_dir}")
-        # A remote URL often carries a token as userinfo; show host only.
-        print(f"  remote:   {redact_url(settings.git_remote_url) or '(local only)'}")
+    print(f"storage: {provider_label(settings.storage_backend)} ({settings.storage_backend})")
+    if settings.storage_backend == "r2":
+        endpoint = settings.endpoint_url if (settings.r2_account_id or settings.r2_endpoint_url) else ""
+        print(f"  endpoint: {endpoint or '(not set)'}")
+        print(f"  bucket:   {settings.r2_bucket or '-'}")
     else:
-        endpoint = settings.vps_endpoint_url or settings.r2_endpoint_url
-        bucket = settings.vps_bucket or settings.r2_bucket
-        print(f"  endpoint: {endpoint or '-'}")
-        print(f"  bucket:   {bucket or '-'}")
+        print(f"  endpoint: {settings.server_endpoint or '-'}")
+        print(f"  bucket:   {settings.server_bucket or '-'}")
     try:
-        store = build_store(settings)
+        store = _store(settings)
         print(f"  ready:    yes ({store.name})")
     except Exception as exc:
         print(f"  ready:    no - {exc}")
     return 0
+
+
+def _storage_test() -> int:
+    """Verify the configured storage can actually read and write objects."""
+    settings = _settings()
+    try:
+        store = _store(settings)
+    except Exception as exc:
+        print(f"Storage is not configured yet ({provider_label(settings.storage_backend)}): {exc}")
+        return 1
+    result = store.test_connection()
+    print(result.message)
+    if result.detail:
+        print(f"technical details: {result.detail}")
+    return 0 if result.ok else 1
 
 
 def _usage(args: argparse.Namespace) -> int:
@@ -467,20 +341,20 @@ def _usage(args: argparse.Namespace) -> int:
 
     settings = _settings()
     usage = UsageCounter(settings.usage_file).snapshot()
-    print("Approximate local R2 usage (free limits: 1M Class A / 10M Class B / 10 GB-month):")
+    print("Approximate local storage usage:")
     print(f"  worlds tracked:    {usage['world_count']}")
     print(f"  uploaded bytes:    {usage['uploaded_bytes']:,} ({usage['uploaded_bytes']/1_000_000:.2f} MB)")
     print(f"  uploads:           {usage['upload_count']}")
     print(f"  downloads:         {usage['download_count']}")
     print(f"  api requests:      {usage['api_request_count']}")
-    print("Authoritative numbers live in the Cloudflare R2 dashboard.")
+    print("Authoritative numbers live in your storage provider's dashboard.")
     return 0
 
 
 def _status(args: argparse.Namespace) -> int:
     settings = _settings()
     if not _configured(settings):
-        print("R2 not configured. Run 'nomad config'.")
+        print("Storage not configured. Run 'nomad storage status' to see what to set.")
         return 1
     try:
         status = _store(settings).status(args.world_id)

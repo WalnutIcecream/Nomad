@@ -4,7 +4,7 @@ When something is wrong with storage access ("who took the lease?", "which key
 did this host authenticate with?"), the useful information is provenance, not
 the secret. This module writes exactly that to ``data/logs/audit.log``:
 
-    action=acquire backend=ssh world=<id> target=nomad@box key=SHA256:... outcome=ok
+    action=acquire backend=r2 world=<id> outcome=ok
 
 The line is emitted through the normal logging stack (so the redaction layer in
 :mod:`launcher.secrets` still applies) and the file is created ``0600``.

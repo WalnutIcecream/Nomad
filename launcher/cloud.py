@@ -34,8 +34,11 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+from launcher import audit
 
 _SERVICE = "s3"
 _REGION = "auto"  # R2 uses "auto" as the signing region
@@ -52,6 +55,55 @@ class CloudError(Exception):
 
 class LeaseError(CloudError):
     """Raised when a conditional lease write loses the race."""
+
+
+@dataclass
+class ConnectionResult:
+    """Outcome of a storage connection test.
+
+    ``message`` is written for a person (what happened + what to do); ``detail``
+    carries the technical specifics for the "view technical details" affordance.
+    """
+
+    ok: bool
+    message: str
+    detail: str = ""
+
+
+def _classify_connection_error(exc: Exception, provider_label: str) -> ConnectionResult:
+    """Turn a storage exception into a plain-language result the UI can show.
+
+    Deliberately avoids surfacing raw S3/HTTP errors as the headline: the user
+    gets what happened and what to try, with the raw text kept in ``detail``.
+    """
+    status = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", None) or str(exc)
+    if status in (401, 403):
+        return ConnectionResult(
+            False,
+            f"Nomad couldn't access this bucket. Check that your {provider_label} "
+            "credentials have permission to read and write objects.",
+            detail,
+        )
+    if status == 404:
+        return ConnectionResult(
+            False,
+            "Nomad couldn't find this bucket. Check that the bucket name is spelled "
+            "correctly and that it already exists.",
+            detail,
+        )
+    if isinstance(exc, (urllib.error.URLError, OSError, TimeoutError)):
+        return ConnectionResult(
+            False,
+            "Nomad couldn't reach your storage server. Check that the server is "
+            "online, the endpoint is correct, and your network connection is working.",
+            detail,
+        )
+    return ConnectionResult(
+        False,
+        "Nomad couldn't use this storage. Check the details below and try again.",
+        detail,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -188,6 +240,9 @@ class S3Client:
                 raise LeaseError(exc.status_code, "conditional write failed (lost the race)") from exc
             raise
         return resp_headers.get("etag", "")
+
+    def delete_object(self, key: str) -> None:
+        self._request("DELETE", key)
 
 
 # --------------------------------------------------------------------------
@@ -327,14 +382,48 @@ class UsageCounter:
 class WorldStore:
     """R2-backed world coordinator: lease + world blob behind one object set."""
 
-    def __init__(self, client: S3Client, player_name: str = "me", usage: UsageCounter | None = None) -> None:
+    def __init__(
+        self,
+        client: S3Client,
+        player_name: str = "me",
+        usage: UsageCounter | None = None,
+        backend: str = "storage",
+    ) -> None:
         self.client = client
         self.player_name = player_name
         self.usage = usage
+        self.backend = backend
 
     def _track(self, **delta: int) -> None:
         if self.usage is not None:
             self.usage.record(**delta)
+
+    # --- connection test -------------------------------------------------
+
+    def test_connection(self, provider_label: str = "storage") -> ConnectionResult:
+        """Prove the configured storage actually works, end to end.
+
+        A head request on the bucket is not enough: Nomad needs to write, read
+        and delete objects under a world prefix. This creates one small
+        temporary object, reads it back, checks the bytes, and removes it, so a
+        "success" means the credentials can do everything hosting requires.
+        """
+        key = f"nomad-connection-test/{uuid.uuid4().hex}.txt"
+        payload = b"nomad connection test"
+        try:
+            self.client.put_object(key, payload, content_type="text/plain")
+            stored = self.client.get_object(key)
+            if stored != payload:
+                return ConnectionResult(
+                    False,
+                    "Nomad could reach this bucket but read back the wrong data. "
+                    "Check that the bucket is not served by a caching proxy.",
+                    f"expected {payload!r}, got {stored!r}",
+                )
+            self.client.delete_object(key)
+        except Exception as exc:  # network, auth, bucket, permissions
+            return _classify_connection_error(exc, provider_label)
+        return ConnectionResult(True, f"Connected to {provider_label}.")
 
     # --- status ----------------------------------------------------------
 
@@ -381,6 +470,7 @@ class WorldStore:
             )
             lease.etag = etag
             self._track(world_count=1)
+            audit.record("acquire", backend=self.backend, world=world_id, outcome="ok")
             return lease
         except LeaseError:
             pass  # a lease already exists; fall through to stale-steal
@@ -390,6 +480,7 @@ class WorldStore:
         current_raw, current_etag = self.client.get_object_etag(lease_key(world_id))
         current = Lease.from_object(current_raw, etag=current_etag)
         if current.is_active:
+            audit.record("acquire", backend=self.backend, world=world_id, outcome="denied")
             raise LeaseError(412, f"world is hosted by {current.holder} until {current.expires_at}")
 
         try:
@@ -403,6 +494,7 @@ class WorldStore:
             raise LeaseError(412, "someone else claimed the world first") from exc
         self._track(api_request_count=1)
         lease.etag = etag
+        audit.record("acquire", backend=self.backend, world=world_id, outcome="ok")
         return lease
 
     def renew(self, world_id: str, lease: Lease) -> Lease:
@@ -435,6 +527,7 @@ class WorldStore:
         self.client.put_object(
             lease_key(world_id), released.to_bytes(), if_match=lease.etag or "", content_type="application/json"
         )
+        audit.record("release", backend=self.backend, world=world_id, outcome="ok")
 
     # --- world blob ------------------------------------------------------
 

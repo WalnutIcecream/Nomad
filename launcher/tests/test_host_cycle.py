@@ -31,8 +31,6 @@ def _settings(tmp: Path, player: str) -> MagicMock:
     s.eula_accepted = True
     s.java_path = "java"
     s.lease_duration_seconds = 60
-    # Booleans must be concrete: a bare MagicMock attribute is truthy.
-    s.ssh_reverse_tunnel = False
     return s
 
 
@@ -180,3 +178,45 @@ def test_manifest_selects_uploaded_files(tmp_path: Path) -> None:
     assert "config.json" in names
     assert "nomad.json" in names  # the pointer file travels with the world
     assert "server.log" not in names
+
+
+def test_failed_upload_keeps_the_lease(tmp_path: Path) -> None:
+    """Data safety: if the world can't be synced, the lease is NOT released.
+
+    Releasing would let the next host pull a world older than the copy still on
+    this disk. The lease is left to expire instead, and the failure is surfaced.
+    """
+    from launcher.cloud import CloudError
+
+    class _FailingUpload(FakeS3Client):
+        def put_object(self, key, body, **kwargs):  # type: ignore[override]
+            if key.endswith("world.tar.gz"):
+                raise CloudError(500, "storage exploded")
+            return super().put_object(key, body, **kwargs)
+
+    client = _FailingUpload()
+    store = WorldStore(client, player_name="alice")
+    runtime = FakeRuntime()
+    agent = HostAgent(_settings(tmp_path, "alice"), store, WORLD, runtime=runtime)
+
+    assert _host_until_stopped(agent, runtime) == 1
+    assert agent.upload_error
+    lease = json.loads(client.objects[lease_key("w1")][0].decode())
+    assert lease["status"] == "active", "lease must survive a failed sync"
+
+
+def test_progress_phases_are_reported(tmp_path: Path) -> None:
+    """The agent narrates its lifecycle so the UI can show real states."""
+    phases: list[str] = []
+    client = FakeS3Client()
+    store = WorldStore(client, player_name="alice")
+    runtime = FakeRuntime()
+    agent = HostAgent(
+        _settings(tmp_path, "alice"), store, WORLD, runtime=runtime, progress=phases.append
+    )
+
+    assert _host_until_stopped(agent, runtime) == 0
+    assert phases[0] == "starting"
+    for expected in ("pulling", "booting", "hosting", "syncing", "releasing", "done"):
+        assert expected in phases
+    assert phases[-1] == "done"

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nomad"
 dynamic = ["version"]
-description = "Distributed Minecraft hosting over pluggable object storage (R2, git, or self-hosted S3)"
+description = "Distributed Minecraft hosting over your own object storage (Cloudflare R2 or a self-hosted S3 server)"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = [
@@ -19,6 +19,11 @@ dev = [
 ]
 ui = [
     "PySide6>=6.7",
+]
+# Store storage credentials in the OS keychain. Optional: without it Nomad
+# falls back to a 0600 settings file.
+secure = [
+    "keyring>=24",
 ]
 
 [project.scripts]

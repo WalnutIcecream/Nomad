@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from launcher.cloud import Lease, S3Client, UsageCounter, WorldStore
+from launcher.cloud import ConnectionResult, Lease, S3Client, UsageCounter, WorldStore
 from launcher.storage import WorldStoreProtocol
 
 
@@ -36,7 +36,9 @@ class R2WorldStore(WorldStoreProtocol):
             secret,
             settings.r2_bucket,
         )
-        return cls(WorldStore(client, player_name=settings.player_name, usage=usage))
+        return cls(
+            WorldStore(client, player_name=settings.player_name, usage=usage, backend=cls.name)
+        )
 
     # --- WorldStoreProtocol ---------------------------------------------
 
@@ -57,3 +59,6 @@ class R2WorldStore(WorldStoreProtocol):
 
     def upload_world(self, world_id: str, archive: Path) -> None:
         self._store.upload_world(world_id, archive)
+
+    def test_connection(self) -> ConnectionResult:
+        return self._store.test_connection("Cloudflare R2")

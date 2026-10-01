@@ -1,11 +1,11 @@
-"""The R2 host lifecycle: lease -> pull -> boot -> renew -> push -> release.
+"""The host lifecycle: lease -> pull -> boot -> renew -> push -> release.
 
 This is the whole "first player to press Play becomes the host" flow:
 
-1. Acquire the lease in R2 (atomic conditional write). If someone else holds an
-   active lease, bail with HOST_EXISTS and the UI offers Join.
+1. Acquire the lease in shared storage (atomic conditional write). If someone
+   else holds an active lease, bail with HOST_EXISTS and the UI offers Join.
 2. Pull the latest ``world.tar.gz`` and extract it into the run directory.
-3. Install/validate the vanilla server jar and boot it from that directory.
+3. Install/validate the server runtime and boot it from that directory.
 4. Renew the lease on a heartbeat thread for as long as the server runs.
 5. On stop: shut the server down (world flushed), tar the world directory,
    upload it as the new shared version, then release the lease — only after the
@@ -25,9 +25,7 @@ from launcher.cloud import CloudError, Lease, LeaseError, WorldStore
 from launcher.manifest import ServerManifest, create_archive, load_manifest
 from launcher.minecraft.vanilla import VanillaMinecraftRuntime
 from launcher.process_runtime import ProcessRuntime
-from launcher.ssh_connection import SshConnection
 from launcher.sync.worldfolder import ensure_world_level
-from launcher.tunnel import ReverseTunnel, TunnelError
 
 logger = logging.getLogger(__name__)
 
@@ -39,21 +37,26 @@ class HostAgent:
         store: WorldStore,
         world: dict,
         runtime: VanillaMinecraftRuntime | ProcessRuntime | None = None,
+        progress=None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.world = world
         self.runtime = runtime
+        # Optional callback(phase) so the UI can narrate what is happening.
+        self._progress = progress or (lambda phase: None)
 
         self.world_id = str(world["id"])
         self.run_dir = self.settings.worlds_dir / self.world_id
         self.manifest: ServerManifest | None = None
-        self.tunnel: ReverseTunnel | None = None
         self.lease: Lease | None = None
         self.stop_requested = threading.Event()
+        self.upload_error: str | None = None
         self._renew_error: Exception | None = None
         self._renew_thread: threading.Thread | None = None
         self._released = False
+        # Set when the lease must outlive a failed upload (see _upload_and_release).
+        self._preserve_lease = False
 
     # --- entry ----------------------------------------------------------
 
@@ -61,36 +64,24 @@ class HostAgent:
         """Run the full host session. Returns 0 on clean stop, 1 on failure."""
         minecraft_version = self.world.get("minecraft_version") or self.settings.minecraft_version
 
-        # 1. Bring storage online first (one ssh handshake for the whole
-        # session), then the tunnel, then the lease. Ordered so the address we
-        # publish is one that actually exists.
-        self._open_store()
-        try:
-            self.tunnel = self._start_tunnel_if_requested()
-        except TunnelError as exc:
-            logger.error("%s", exc)
-            return 1
-        published_address = self.tunnel.address if self.tunnel else (
-            self.settings.public_address or None
-        )
-
-        # 2. Lease.
+        # 1. Lease. The address we publish is the one friends can already reach.
+        published_address = self.settings.public_address or None
+        self._progress("starting")
         logger.info("acquiring host lease for %s…", self.world.get("name"))
         try:
             self.lease = self.store.acquire(self.world_id, address=published_address)
         except LeaseError as exc:
             logger.info("host already exists: %s", exc.detail)
-            self._stop_tunnel()
             return 1
         except CloudError as exc:
             logger.error("could not reach world storage: %s", exc.detail)
-            self._stop_tunnel()
             return 1
         logger.info("lease acquired (holder=%s)", self.lease.holder)
 
         try:
             # 2. Pull the latest shared world. The archive lives next to the
             # run dir (not inside it) because extraction clears the run dir.
+            self._progress("pulling")
             self.run_dir.mkdir(parents=True, exist_ok=True)
             archive = self.run_dir.parent / f"{self.world_id}.tar.gz"
             if self.store.download_world(self.world_id, archive):
@@ -130,6 +121,7 @@ class HostAgent:
                     return 1
 
             # 4. Boot.
+            self._progress("booting")
             handle = runtime.start(
                 self.settings.install_dir,
                 self.run_dir,
@@ -140,6 +132,7 @@ class HostAgent:
 
             # 5. Renew the lease while running.
             self._start_renewer()
+            self._progress("hosting")
             logger.info("hosting %s from %s", self.world.get("name"), self.run_dir)
 
             try:
@@ -156,75 +149,23 @@ class HostAgent:
             finally:
                 self._stop_renewer()
                 if handle.is_running():
+                    self._progress("stopping")
                     self._stop_server(handle)
 
             # 6. Push + release.
             self._upload_and_release()
-            return 0
+            self._progress("done")
+            return 1 if self.upload_error else 0
         finally:
-            # On any error/early-return path the lease must not stay held
-            # forever. Release now if we still hold it (expiry frees it if the
-            # release itself fails).
-            if self.lease is not None and not self._released:
+            # On a failure path the lease must not stay held forever — it is
+            # released here (expiry is the backstop) unless the upload failed,
+            # in which case the lease is deliberately preserved so the next host
+            # cannot pull a world older than the one still on this disk.
+            if self.lease is not None and not self._released and not self._preserve_lease:
                 try:
                     self.store.release(self.world_id, self.lease)
                 except Exception:
                     logger.warning("could not release lease (expiry will free it)")
-            self._stop_tunnel()
-            self._close_store()
-
-    # --- storage connection ----------------------------------------------
-
-    def _open_store(self) -> None:
-        """Establish the storage connection once for the whole session.
-
-        Non-fatal: if the pre-open fails, individual operations still try (and
-        report their own error), so a transient handshake problem does not
-        abort the run before it starts.
-        """
-        opener = getattr(self.store, "open", None)
-        if not callable(opener):
-            return
-        try:
-            opener()
-        except Exception as exc:
-            logger.warning("could not pre-open storage connection: %s", exc)
-
-    def _close_store(self) -> None:
-        closer = getattr(self.store, "close", None)
-        if callable(closer):
-            try:
-                closer()
-            except Exception as exc:
-                logger.debug("storage close failed: %s", exc)
-
-    # --- reverse tunnel --------------------------------------------------
-
-    def _start_tunnel_if_requested(self) -> ReverseTunnel | None:
-        """Open the reverse tunnel when enabled; None when not configured."""
-        if not getattr(self.settings, "ssh_reverse_tunnel", False):
-            return None
-        if not getattr(self.settings, "ssh_target", ""):
-            raise TunnelError("reverse tunnel needs NOMAD_SSH_TARGET (user@host)")
-
-        connection = SshConnection.build(self.settings)
-        local_port = self.settings.server_port
-        remote_port = getattr(self.settings, "ssh_remote_port", 0) or local_port
-        tunnel = ReverseTunnel(
-            connection,
-            remote_port=remote_port,
-            local_port=local_port,
-            remote_host=getattr(self.settings, "ssh_remote_host", ""),
-        )
-        tunnel.start()
-        logger.info("reverse tunnel up: friends connect to %s", tunnel.address)
-        return tunnel
-
-    def _stop_tunnel(self) -> None:
-        if self.tunnel is not None:
-            self.tunnel.stop()
-            logger.info("reverse tunnel closed")
-            self.tunnel = None
 
     # --- server control -------------------------------------------------
 
@@ -273,6 +214,7 @@ class HostAgent:
 
     def _upload_and_release(self) -> None:
         assert self.lease is not None
+        self._progress("syncing")
         archive = self.run_dir / "upload.tar.gz"
         try:
             if self.manifest is not None:
@@ -290,9 +232,18 @@ class HostAgent:
             logger.info("uploading world (%d bytes)…", archive.stat().st_size)
             self.store.upload_world(self.world_id, archive)
             logger.info("world uploaded")
+        except Exception as exc:
+            # Data safety: the upload did not land, so the lease is kept rather
+            # than released — otherwise the next host would pull a world older
+            # than the copy still on this disk. The lease expires on its own.
+            self.upload_error = str(exc) or exc.__class__.__name__
+            self._preserve_lease = True
+            logger.error("could not sync the world to shared storage: %s", exc)
+            return
         finally:
             archive.unlink(missing_ok=True)
 
+        self._progress("releasing")
         try:
             self.store.release(self.world_id, self.lease)
             self._released = True
