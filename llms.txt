@@ -34,8 +34,8 @@
 - [launcher/server_properties.py](launcher/server_properties.py) — whitelisted Minecraft server.properties.
 - [launcher/minecraft/](launcher/minecraft/) — vanilla runtime (jar download, Java 21 check, process control).
 - [launcher/sync/](launcher/sync/) — world folder helpers.
-- [launcher/cli/](launcher/cli/) — `nomad` command-line interface.
-- [launcher/ui/](launcher/ui/) — PySide6 launcher (theme, storage wizard, world cards).
+- [launcher/cli/](launcher/cli/) — `nomad` command-line interface (the single entry point; `nomad gui` opens the desktop window).
+- [launcher/ui/](launcher/ui/) — PySide6 launcher (theme, storage wizard, world cards), launched via `nomad gui` or `python -m launcher.ui`.
 - [launcher/tests/](launcher/tests/) — pytest suite.
 - [scripts/app/build_app.py](scripts/app/build_app.py) — PyInstaller + embedded JRE packaging.
 - [scripts/app/make_icon.py](scripts/app/make_icon.py) — icon generator.

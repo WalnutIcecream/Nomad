@@ -10,6 +10,7 @@ Commands:
     nomad play <world-id>        host a world (lease -> pull -> boot -> push)
     nomad status <world-id>      show who hosts a world right now
     nomad usage                  approximate local usage counters
+    nomad gui                    launch the desktop window
 """
 
 from __future__ import annotations
@@ -52,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("world_id", help="world id")
 
     subparsers.add_parser("usage", help="show approximate local usage counters")
+
+    subparsers.add_parser("gui", help="launch the desktop window")
 
     manifest = subparsers.add_parser("manifest", help="inclusion manifest (nomad.json) tools")
     manifest_sub = manifest.add_subparsers(dest="manifest_command", required=True)
@@ -107,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
             return _status(args)
         if args.command == "usage":
             return _usage(args)
+        if args.command == "gui":
+            return _gui()
         if args.command == "manifest":
             if args.manifest_command == "init":
                 return _manifest_init(args)
@@ -368,6 +373,17 @@ def _status(args: argparse.Namespace) -> int:
     else:
         print("Not hosted right now — press play to become the host.")
     return 0
+
+
+def _gui() -> int:
+    """Launch the desktop window (the same code path as ``python -m launcher.ui``)."""
+    try:
+        from launcher.ui.app import run
+    except ImportError:
+        print("The desktop window needs PySide6, which is missing or not working.")
+        print('Install it with:  python -m pip install -e ".[ui]"')
+        return 1
+    return run([])
 
 
 if __name__ == "__main__":

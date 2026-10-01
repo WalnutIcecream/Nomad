@@ -1,14 +1,18 @@
-"""Build a self-contained desktop app for Nomad.
+"""Build a self-contained Nomad app.
 
-Produces a portable ``dist/Nomad/`` folder (works on Windows / Linux / macOS):
+Produces one portable ``nomad`` executable per platform (Windows / Linux /
+macOS), bundled under ``dist/nomad/``:
 
-    dist/Nomad/
-        Nomad(.exe)          double-click launcher/gui
-        nomad(.exe)          the command-line tool (renamed to ``nomad-cli``
-                             on Windows because Windows cannot hold both
-                             Nomad.exe and nomad.exe in the same folder)
+    dist/nomad/
+        nomad(.exe)          the single entry point: every CLI command plus
+                             ``nomad gui`` for the desktop window
+        _internal/           bundled Python runtime + dependencies
         java/                embedded Temurin JRE 21 (downloaded once, cached)
         data/                runtime data (worlds, registry, settings)
+
+There is deliberately just one binary on every platform: the GUI is reached
+through ``nomad gui`` rather than a separate executable, so Windows no longer
+needs a ``nomad-cli`` rename to dodge the ``Nomad.exe``/``nomad.exe`` clash.
 
 The app is version-agnostic for Minecraft: it fetches the vanilla server.jar
 for the configured ``NOMAD_MC_VERSION`` at runtime, so no jar is baked in. Only
@@ -36,7 +40,7 @@ CACHE = ROOT / "scripts" / "app" / ".cache"
 WORK = ROOT / "build" / "app"
 SPEC = ROOT / "scripts" / "app" / "spec"
 DIST = ROOT / "dist"
-OUT = DIST / "Nomad"
+OUT = DIST / "nomad"
 
 # Interpreters: prefer the repo venv, then the active python.
 _PY = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -82,7 +86,8 @@ _HIDDEN = [
     "launcher.ui.widgets",
 ]
 
-# Extra data PySide6 needs that PyInstaller's hooks sometimes miss.
+# Extra data PySide6 needs that PyInstaller's hooks sometimes miss. The GUI is
+# loaded lazily by `nomad gui`, so it must be bundled into the single binary.
 _COLLECT: dict[str, list[str]] = {}
 for pkg in ("PySide6", "shiboken6"):
     _COLLECT.setdefault(pkg, [])
@@ -131,7 +136,7 @@ def _extract_java(dest: Path) -> None:
                     shutil.copyfileobj(src, dst)
 
 
-def _pyi(name: str, script: Path, *, windowed: bool = False, collect: bool = False, onefile: bool = False) -> None:
+def _pyi(name: str, script: Path, *, collect: bool = False) -> None:
     cmd = [
         str(_PY),
         "-m",
@@ -155,24 +160,15 @@ def _pyi(name: str, script: Path, *, windowed: bool = False, collect: bool = Fal
     icon = ROOT / "assets" / "nomad.ico"
     if icon.exists():
         cmd += ["--icon", str(icon)]
-    if onefile:
-        cmd.append("--onefile")
-    if windowed:
-        cmd.append("--windowed")
     cmd.append(str(script))
     _run(cmd)
 
 
 def build_apps() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
-    # Name the cli differently on Windows (NOMAD vs nomad collision in one dir).
-    cli_name = "nomad-cli" if _IS_WINDOWS else "nomad"
-    # GUI onedir -> lands in dist/Nomad/ (our OUT). The onedir COLLECT step
-    # clears OUT, so run it before moving the CLI in afterward.
-    _pyi("Nomad", ROOT / "launcher" / "ui" / "__main__.py", windowed=True, collect=True)
-    # CLI onefile -> lands directly in dist/, then moved into OUT.
-    _pyi(cli_name, ROOT / "launcher" / "cli" / "__main__.py", onefile=True)
-    shutil.move(str(DIST / ("nomad-cli.exe" if _IS_WINDOWS else "nomad")), str(OUT))
+    # One console executable named `nomad` on every platform. The CLI needs a
+    # console, and `nomad gui` starts the window from that same process, so a
+    # single binary covers both without the old GUI/CLI name collision.
+    _pyi("nomad", ROOT / "launcher" / "cli" / "__main__.py", collect=True)
 
 
 def assemble() -> None:
@@ -200,7 +196,7 @@ def main() -> int:
         p.stat().st_size for p in OUT.rglob("*") if p.is_file()
     ) // (1024 * 1024)
     print(f"\napp ready at {OUT} (~{size_mb} MB)", flush=True)
-    print("configure storage (env vars or data/settings.json), then run Nomad(.exe).", flush=True)
+    print("configure storage (env vars or data/settings.json), then run `nomad` or `nomad gui`.", flush=True)
     return 0
 
 

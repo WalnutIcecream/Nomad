@@ -39,6 +39,11 @@ All notable changes to this project are documented here. The format follows
   single "hosting" flag.
 - Lease operations are now recorded in the audit trail for the S3 backends, not
   just the removed SSH backend.
+- One entry point everywhere: a single `nomad` command runs every CLI operation,
+  and `nomad gui` opens the desktop window. The separate `nomad-gui` script and
+  the second packaging binary are gone, which removes the Windows
+  `Nomad.exe`/`nomad.exe` name collision and the `nomad-cli` rename workaround,
+  so the same command works on Windows, Linux and macOS.
 
 ### Fixed
 

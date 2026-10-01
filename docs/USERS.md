@@ -478,12 +478,13 @@ nomad play <world-id>               # host until Ctrl-C; pushes world on stop
 nomad status <world-id>             # who hosts now
 nomad worlds                        # list worlds with live host status
 nomad usage                         # approximate local usage counters
+nomad gui                           # launch the desktop window
 ```
 
 Environment setup: `python -m pip install -e ".[dev]"` (core + tests),
-`python -m pip install -e ".[ui]"` (adds the PySide6 GUI), or
-`python -m pip install -e ".[ui,secure]"` (adds OS-keychain credential storage).
-Requires Python ≥ 3.11 and Java 21 to host.
+`python -m pip install -e ".[ui]"` (adds the PySide6 desktop window, opened with
+`nomad gui`), or `python -m pip install -e ".[ui,secure]"` (adds OS-keychain
+credential storage). Requires Python ≥ 3.11 and Java 21 to host.
 
 ## Advanced: editing the raw connection values
 

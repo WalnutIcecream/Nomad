@@ -27,8 +27,9 @@ secure = [
 ]
 
 [project.scripts]
+# One entry point for everything: CLI commands and `nomad gui` for the desktop
+# window. `python -m launcher.ui` still works as an alternative.
 nomad = "launcher.cli.main:main"
-nomad-gui = "launcher.ui.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["launcher*"]

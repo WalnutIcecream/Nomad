@@ -193,8 +193,9 @@ python -m pip install -e ".[ui]"         # + PySide6 GUI
 python -m pip install -e ".[ui,secure]"  # + OS-keychain credential storage
 ```
 
-Then run `nomad-gui` and follow the storage wizard. The command-line
-equivalent is `nomad storage set r2|server` followed by `nomad storage test`.
+Everything launches through the single `nomad` command. Run `nomad gui` and
+follow the storage wizard, or use the command-line equivalents `nomad storage
+set r2|server` followed by `nomad storage test`.
 
 ## CLI
 
@@ -210,9 +211,11 @@ nomad play <world-id>            # host until Ctrl-C; pushes world on stop
 nomad status <world-id>          # who hosts now
 nomad worlds                     # list worlds with host status
 nomad usage                      # local usage counters
+nomad gui                        # launch the desktop window
 ```
 
-`nomad-gui` (or `python -m launcher.ui`) launches the PySide6 window.
+`nomad gui` (or `python -m launcher.ui`) launches the PySide6 window. The same
+`nomad` binary runs every command above on Windows, Linux and macOS.
 
 ## Configuration
 
@@ -261,11 +264,12 @@ service required.
 
 ## Packaging
 
-`scripts/app/build_app.py` builds a self-contained `dist/Nomad/` via PyInstaller
+`scripts/app/build_app.py` builds a self-contained `dist/nomad/` via PyInstaller
 with an embedded Temurin JRE 21. Run it from the repo root with PyInstaller
 installed; the JRE archive is downloaded once and cached under
-`scripts/app/.cache`. Produces `Nomad` (GUI) and `nomad-cli` binaries plus a
-`java/` runtime and a writable `data/` directory.
+`scripts/app/.cache`. Produces a single `nomad` binary (console) plus a `java/`
+runtime and a writable `data/` directory — the GUI opens through `nomad gui`, so
+there is no separate GUI executable on any platform.
 
 ## Design constraints
 
