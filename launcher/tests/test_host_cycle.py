@@ -220,3 +220,34 @@ def test_progress_phases_are_reported(tmp_path: Path) -> None:
     for expected in ("pulling", "booting", "hosting", "syncing", "releasing", "done"):
         assert expected in phases
     assert phases[-1] == "done"
+
+
+def test_tunnel_address_is_published_and_stopped(tmp_path: Path) -> None:
+    """A tunnel's public address goes into the lease and is torn down on stop."""
+    from types import SimpleNamespace
+
+    class StubTunnel:
+        name = "stub"
+
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+
+        def start(self, local_port):
+            self.started = True
+            return SimpleNamespace(provider="stub", public_address="198.51.100.7:25565")
+
+        def stop(self, tunnel):
+            self.stopped = True
+
+    client = FakeS3Client()
+    store = WorldStore(client, player_name="alice")
+    runtime = FakeRuntime()
+    tunnel = StubTunnel()
+    agent = HostAgent(_settings(tmp_path, "alice"), store, WORLD, runtime=runtime, tunnel=tunnel)
+
+    assert _host_until_stopped(agent, runtime) == 0
+    lease = json.loads(client.objects[lease_key("w1")][0].decode())
+    assert lease["address"] == "198.51.100.7:25565"
+    assert tunnel.started
+    assert tunnel.stopped

@@ -27,6 +27,7 @@ SECRET_FIELDS: tuple[str, ...] = (
     "r2_secret_key",
     "server_access_key",
     "server_secret_key",
+    "tunnel_playit_secret",
 )
 
 

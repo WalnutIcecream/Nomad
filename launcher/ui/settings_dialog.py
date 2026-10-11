@@ -12,6 +12,7 @@ import threading
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 from launcher.config import LauncherSettings, save_settings_file
 from launcher.secrets import secret_value
 from launcher.storage import provider_label
+from launcher.tunnel import PROVIDERS as TUNNEL_PROVIDERS
 from launcher.ui import theme
 from launcher.ui.storage_wizard import StorageWizard
 
@@ -35,6 +37,7 @@ class SettingsDialog(QDialog):
     """Storage summary + advanced connection values + local identity."""
 
     test_finished = Signal(object)
+    tunnel_finished = Signal(object)
 
     def __init__(self, settings: LauncherSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,12 +104,44 @@ class SettingsDialog(QDialog):
         identity_form.addRow("Public address", self.public_address)
         root.addWidget(identity)
 
+        tunnel = QGroupBox("Port forwarding")
+        tunnel_layout = QVBoxLayout(tunnel)
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method"))
+        self.tunnel_provider = QComboBox()
+        for provider_id, label in TUNNEL_PROVIDERS.items():
+            self.tunnel_provider.addItem(label, provider_id)
+        method_row.addWidget(self.tunnel_provider)
+        method_row.addStretch()
+        tunnel_layout.addLayout(method_row)
+
+        self.playit_fields = QWidget()
+        playit_form = QFormLayout(self.playit_fields)
+        playit_form.setContentsMargins(0, 0, 0, 0)
+        self.tunnel_bin = QLineEdit()
+        self.tunnel_bin.setPlaceholderText("playit")
+        playit_form.addRow("playit agent", self.tunnel_bin)
+        self.tunnel_secret = QLineEdit()
+        self.tunnel_secret.setEchoMode(QLineEdit.Password)
+        self.tunnel_secret.setPlaceholderText("playit.gg secret key")
+        playit_form.addRow("playit secret", self.tunnel_secret)
+        self.tunnel_test_button = QPushButton("Test tunnel")
+        self.tunnel_test_button.clicked.connect(self._test_tunnel)
+        playit_form.addRow("", self.tunnel_test_button)
+        self.tunnel_feedback = QLabel("")
+        self.tunnel_feedback.setWordWrap(True)
+        playit_form.addRow("", self.tunnel_feedback)
+        tunnel_layout.addWidget(self.playit_fields)
+        root.addWidget(tunnel)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
         self.test_finished.connect(self._on_test_finished)
+        self.tunnel_finished.connect(self._on_tunnel_finished)
+        self.tunnel_provider.currentIndexChanged.connect(self._refresh_tunnel_fields)
         self._load()
 
     # --- data ------------------------------------------------------------
@@ -123,6 +158,11 @@ class SettingsDialog(QDialog):
         self.bucket.setText(s.r2_bucket if is_r2 else s.server_bucket)
         self.player_name.setText(s.player_name)
         self.public_address.setText(s.public_address)
+        index = self.tunnel_provider.findData(s.tunnel_provider)
+        self.tunnel_provider.setCurrentIndex(index if index >= 0 else 0)
+        self.tunnel_bin.setText(s.tunnel_playit_bin)
+        self.tunnel_secret.setText(secret_value(s.tunnel_playit_secret))
+        self._refresh_tunnel_fields()
 
     def _apply_to(self, target: LauncherSettings) -> None:
         endpoint = self.endpoint.text().strip()
@@ -143,6 +183,10 @@ class SettingsDialog(QDialog):
         if self.player_name.text().strip():
             target.player_name = self.player_name.text().strip()
         target.public_address = self.public_address.text().strip()
+        target.tunnel_provider = self.tunnel_provider.currentData()
+        target.tunnel_playit_bin = self.tunnel_bin.text().strip()
+        if self.tunnel_secret.text().strip():
+            target.tunnel_playit_secret = self.tunnel_secret.text().strip()
 
     # --- actions ---------------------------------------------------------
 
@@ -176,6 +220,41 @@ class SettingsDialog(QDialog):
         ok, message = outcome
         self.storage_feedback.setText(message)
         self.storage_feedback.setStyleSheet(
+            f"color: {theme.STATUS_OK if ok else theme.STATUS_ERROR};"
+        )
+
+    def _refresh_tunnel_fields(self) -> None:
+        self.playit_fields.setVisible(self.tunnel_provider.currentData() == "playit")
+
+    def _test_tunnel(self) -> None:
+        from launcher.tunnel import build_tunnel
+
+        self.tunnel_feedback.setText("Opening the tunnel…")
+        self.tunnel_feedback.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        candidate = self.settings.model_copy(deep=True)
+        self._apply_to(candidate)
+
+        def work() -> None:
+            try:
+                tunnel = build_tunnel(candidate)
+                active = tunnel.start(candidate.server_port)
+            except Exception as exc:
+                self.tunnel_finished.emit((False, f"Tunnel failed: {exc}"))
+                return
+            try:
+                address = active.public_address
+                self.tunnel_finished.emit(
+                    (address is not None, f"Tunnel is up: {address or 'no address could be read'}")
+                )
+            finally:
+                tunnel.stop(active)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_tunnel_finished(self, outcome: tuple[bool, str]) -> None:
+        ok, message = outcome
+        self.tunnel_feedback.setText(message)
+        self.tunnel_feedback.setStyleSheet(
             f"color: {theme.STATUS_OK if ok else theme.STATUS_ERROR};"
         )
 

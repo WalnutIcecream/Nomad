@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format follows
   the `0600` settings file otherwise. Opt in to `keyring` with the `secure`
   extra; disable entirely with `NOMAD_KEYCHAIN=0`.
 - `nomad storage test` verifies the configured storage from the command line.
+- A pluggable tunnel layer for port-forwarding. `nomad tunnel set playit` (or
+  `NOMAD_TUNNEL=playit`) makes Nomad run the playit.gg agent when you host,
+  publish the address it is assigned in the world lease, and share it through
+  the existing join/status flow. `none` keeps the manual static
+  `NOMAD_PUBLIC_ADDRESS` path, and `nomad tunnel test` proves a tunnel can open.
 - Redesigned launcher UI on a real design-token theme (dark palette, status
   colours, spacing): world cards with clear states (Ready, Starting, Hosting,
   Someone is hosting, Syncing, Stopping, Offline, Storage unavailable, Error), a

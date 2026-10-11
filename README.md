@@ -212,10 +212,17 @@ nomad status <world-id>          # who hosts now
 nomad worlds                     # list worlds with host status
 nomad usage                      # local usage counters
 nomad gui                        # launch the desktop window
+nomad tunnel set|status|test     # choose/inspect/test port-forwarding
 ```
 
 `nomad gui` (or `python -m launcher.ui`) launches the PySide6 window. The same
 `nomad` binary runs every command above on Windows, Linux and macOS.
+
+When you host, Nomad publishes an address in the world lease that friends use to
+join. By default that is the static `NOMAD_PUBLIC_ADDRESS` (manual port-forward /
+LAN). With `nomad tunnel set playit` (or `NOMAD_TUNNEL=playit`), Nomad instead
+runs the playit.gg agent and publishes the address it is assigned, so no router
+configuration is needed.
 
 ## Configuration
 
@@ -238,7 +245,10 @@ vars > `data/settings.json` > `.env` > built-in defaults.
 | `NOMAD_AUDIT_LOG` | `1` | write the non-secret lease/credential-use audit trail |
 | `NOMAD_DATA_DIR` | platform default | launcher state, worlds |
 | `NOMAD_PLAYER_NAME` | env username | holder name in the lease |
-| `NOMAD_PUBLIC_ADDRESS` | — | address published in the lease (port-forward) |
+| `NOMAD_PUBLIC_ADDRESS` | — | static address published in the lease (manual port-forward) |
+| `NOMAD_TUNNEL` | `none` | `none` \| `playit` — how to make a hosted server reachable |
+| `NOMAD_TUNNEL_PLAYIT_BIN` | `playit` | playit.gg agent binary name or path |
+| `NOMAD_TUNNEL_PLAYIT_SECRET` | — | playit.gg agent secret key (stored in the keychain) |
 | `NOMAD_MC_VERSION` | `1.21.1` | vanilla server jar version |
 | `NOMAD_SERVER_PORT` | `25565` | server listen port |
 | `NOMAD_JAVA_PATH` | `java` on PATH | JVM executable |

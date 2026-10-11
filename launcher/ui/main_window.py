@@ -43,6 +43,7 @@ POLL_INTERVAL_MS = 3000
 
 # Host-lifecycle phases (from HostAgent) mapped onto card states.
 PHASE_STATES = {
+    "tunneling": "starting",
     "starting": "starting",
     "pulling": "starting",
     "booting": "starting",
@@ -291,11 +292,16 @@ class MainWindow(QWidget):
         name = next(
             (w["name"] for w in self.registry.list_worlds() if w["id"] == world_id), "world"
         )
+        address = getattr(self.active_agents.get(world_id), "published_address", None)
+        hosting = "You're hosting. Friends can join now."
+        if address:
+            hosting = f"You're hosting. Friends join at {address}."
         messages = {
+            "tunneling": "Opening a tunnel…",
             "starting": f"Starting {name}…",
             "pulling": "Loading the world…",
             "booting": "Starting the server…",
-            "hosting": "You're hosting. Friends can join now.",
+            "hosting": hosting,
             "stopping": "Stopping the server…",
             "syncing": "Saving and syncing the world…",
             "releasing": "World is ready for another player.",

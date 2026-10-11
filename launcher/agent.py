@@ -38,6 +38,7 @@ class HostAgent:
         world: dict,
         runtime: VanillaMinecraftRuntime | ProcessRuntime | None = None,
         progress=None,
+        tunnel=None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -45,11 +46,16 @@ class HostAgent:
         self.runtime = runtime
         # Optional callback(phase) so the UI can narrate what is happening.
         self._progress = progress or (lambda phase: None)
+        # Optional tunnel provider; resolved from settings when omitted.
+        self.tunnel = tunnel
 
         self.world_id = str(world["id"])
         self.run_dir = self.settings.worlds_dir / self.world_id
         self.manifest: ServerManifest | None = None
         self.lease: Lease | None = None
+        self._tunnel = None
+        self._active_tunnel = None
+        self.published_address: str | None = None
         self.stop_requested = threading.Event()
         self.upload_error: str | None = None
         self._renew_error: Exception | None = None
@@ -58,14 +64,40 @@ class HostAgent:
         # Set when the lease must outlive a failed upload (see _upload_and_release).
         self._preserve_lease = False
 
+    def _resolve_tunnel(self):
+        """Return the tunnel provider to use, or None on misconfiguration."""
+        if self.tunnel is not None:
+            return self.tunnel
+        from launcher.tunnel import build_tunnel
+
+        try:
+            return build_tunnel(self.settings)
+        except Exception as exc:
+            logger.warning("could not build tunnel provider (%s); using static address", exc)
+            return None
+
     # --- entry ----------------------------------------------------------
 
     def host(self) -> int:
         """Run the full host session. Returns 0 on clean stop, 1 on failure."""
         minecraft_version = self.world.get("minecraft_version") or self.settings.minecraft_version
 
-        # 1. Lease. The address we publish is the one friends can already reach.
+        # 1. Tunnel + lease. Open the tunnel first so the address we publish in
+        # the lease is the one friends can actually reach.
         published_address = self.settings.public_address or None
+        tunnel = self._resolve_tunnel()
+        active_tunnel = None
+        if tunnel is not None:
+            self._progress("tunneling")
+            try:
+                active_tunnel = tunnel.start(self.settings.server_port)
+                published_address = active_tunnel.public_address or published_address
+            except Exception as exc:
+                logger.warning("tunnel did not start (%s); using static address", exc)
+        self._tunnel = tunnel
+        self._active_tunnel = active_tunnel
+        self.published_address = published_address
+
         self._progress("starting")
         logger.info("acquiring host lease for %s…", self.world.get("name"))
         try:
@@ -157,6 +189,13 @@ class HostAgent:
             self._progress("done")
             return 1 if self.upload_error else 0
         finally:
+            # Tear the tunnel down first: the server has already stopped, so it
+            # has nothing left to forward.
+            if self._tunnel is not None and self._active_tunnel is not None:
+                try:
+                    self._tunnel.stop(self._active_tunnel)
+                except Exception:
+                    logger.warning("could not stop tunnel cleanly")
             # On a failure path the lease must not stay held forever — it is
             # released here (expiry is the backstop) unless the upload failed,
             # in which case the lease is deliberately preserved so the next host

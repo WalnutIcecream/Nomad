@@ -155,6 +155,16 @@ class LauncherSettings(BaseSettings):
     # Address published in the lease so friends know where to connect.
     public_address: str = ""
 
+    # --- tunnel / port forwarding ---------------------------------------
+    # How to make a hosted server reachable from the internet.
+    #   "none"   -> publish the static public_address (manual/LAN)
+    #   "playit" -> run the playit.gg agent and publish its assigned address
+    tunnel_provider: str = "none"
+    # Path (or bare name) of the playit.gg agent binary.
+    tunnel_playit_bin: str = "playit"
+    # The playit.gg agent secret key (linked once from the playit.gg dashboard).
+    tunnel_playit_secret: SecretStr = SecretStr("")
+
     @property
     def endpoint_url(self) -> str:
         if self.r2_endpoint_url:
@@ -209,6 +219,8 @@ _FILE_FIELDS: tuple[str, ...] = (
     "server_bucket",
     "player_name",
     "public_address",
+    "tunnel_provider",
+    "tunnel_playit_bin",
     "audit_log",
 )
 

@@ -23,6 +23,7 @@
 
 - [launcher/cloud.py](launcher/cloud.py) — S3/SigV4 client, `WorldStore`, `Lease`, connection test, usage counters.
 - [launcher/storage/](launcher/storage/) — `WorldStoreProtocol`, `build_store`, and the `r2` and `server` backends.
+- [launcher/tunnel/](launcher/tunnel/) — `TunnelProvider`, `build_tunnel`, and the `none`/`playit` port-forwarding providers.
 - [launcher/credentials.py](launcher/credentials.py) — OS-keychain secret storage with a `0600`-file fallback.
 - [launcher/manifest.py](launcher/manifest.py) — inclusion manifest (`nomad.json`): what to sync + how to launch any game.
 - [launcher/process_runtime.py](launcher/process_runtime.py) — generic runtime for arbitrary server commands.

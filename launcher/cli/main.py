@@ -11,6 +11,7 @@ Commands:
     nomad status <world-id>      show who hosts a world right now
     nomad usage                  approximate local usage counters
     nomad gui                    launch the desktop window
+    nomad tunnel set|status|test choose how to port-forward (none | playit)
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from launcher.config import LauncherSettings, load_settings_file
 from launcher.storage import PROVIDERS, provider_label
+from launcher.tunnel import PROVIDERS as TUNNEL_PROVIDERS, provider_label as tunnel_provider_label
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     play = subparsers.add_parser("play", help="host a world until stopped (Ctrl-C to stop)")
     play.add_argument("world_id", help="world id")
     play.add_argument("--accept-eula", action="store_true", help="agree to the Minecraft EULA")
+    play.add_argument(
+        "--tunnel",
+        choices=sorted(TUNNEL_PROVIDERS),
+        default=None,
+        help="port-forwarding method for this session (default: configured setting)",
+    )
 
     status = subparsers.add_parser("status", help="show who currently hosts a world")
     status.add_argument("world_id", help="world id")
@@ -74,6 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     storage_sub.add_parser("status", help="show the active backend and its settings")
     storage_sub.add_parser("test", help="check that the configured storage works")
+
+    tunnel = subparsers.add_parser("tunnel", help="choose, inspect and test port-forwarding")
+    tunnel_sub = tunnel.add_subparsers(dest="tunnel_command", required=True)
+    tunnel_set = tunnel_sub.add_parser("set", help="select how to port-forward")
+    tunnel_set.add_argument(
+        "provider",
+        choices=sorted(TUNNEL_PROVIDERS),
+        help="none = manual/static address; playit = playit.gg",
+    )
+    tunnel_sub.add_parser("status", help="show the active tunnel provider and its settings")
+    tunnel_sub.add_parser("test", help="open the configured tunnel and print its address")
 
     return parser
 
@@ -112,6 +131,13 @@ def main(argv: list[str] | None = None) -> int:
             return _usage(args)
         if args.command == "gui":
             return _gui()
+        if args.command == "tunnel":
+            if args.tunnel_command == "set":
+                return _tunnel_set(args)
+            if args.tunnel_command == "status":
+                return _tunnel_status()
+            if args.tunnel_command == "test":
+                return _tunnel_test()
         if args.command == "manifest":
             if args.manifest_command == "init":
                 return _manifest_init(args)
@@ -222,10 +248,11 @@ def _play(args: argparse.Namespace) -> int:
     from launcher.registry import WorldRegistry
 
     settings = _settings()
+    if args.tunnel:
+        settings.tunnel_provider = args.tunnel
     if not args.accept_eula and not settings.eula_accepted:
         print("Minecraft EULA not accepted. Pass --accept-eula or set NOMAD_EULA_ACCEPTED=true.")
         return 1
-
     registry = WorldRegistry(settings.registry_file)
     world = registry.get(args.world_id)
     if world is None:
@@ -373,6 +400,60 @@ def _status(args: argparse.Namespace) -> int:
     else:
         print("Not hosted right now — press play to become the host.")
     return 0
+
+
+def _tunnel_set(args: argparse.Namespace) -> int:
+    from launcher.config import save_settings_file
+
+    settings = _settings()
+    settings.tunnel_provider = args.provider
+    save_settings_file(settings)
+    print(f"tunnel set to: {tunnel_provider_label(args.provider)}")
+    if args.provider == "playit":
+        print("Set NOMAD_TUNNEL_PLAYIT_BIN (agent path) and NOMAD_TUNNEL_PLAYIT_SECRET (secret key).")
+    else:
+        print("Friends reach your server at the public address shown in 'nomad config'.")
+    print("Verify with 'nomad tunnel test'.")
+    return 0
+
+
+def _tunnel_status() -> int:
+    from launcher.secrets import secret_value
+
+    settings = _settings()
+    print(f"tunnel: {tunnel_provider_label(settings.tunnel_provider)} ({settings.tunnel_provider})")
+    if settings.tunnel_provider == "playit":
+        print(f"  agent:   {settings.tunnel_playit_bin or '(not set)'}")
+        print(f"  secret:  {'set' if secret_value(settings.tunnel_playit_secret) else '(not set)'}")
+    else:
+        print(f"  address: {settings.public_address or '(not set)'}")
+    return 0
+
+
+def _tunnel_test() -> int:
+    from launcher.tunnel import build_tunnel
+
+    settings = _settings()
+    try:
+        tunnel = build_tunnel(settings)
+    except Exception as exc:
+        print(f"Could not configure the tunnel ({tunnel_provider_label(settings.tunnel_provider)}): {exc}")
+        return 1
+    try:
+        active = tunnel.start(settings.server_port)
+    except Exception as exc:
+        print(f"Tunnel did not start: {exc}")
+        return 1
+    try:
+        if active.public_address:
+            print(f"Tunnel is up. Friends connect at: {active.public_address}")
+            return 0
+        print("Tunnel started, but its public address could not be read automatically.")
+        if settings.public_address:
+            print(f"Falling back to the configured public address: {settings.public_address}")
+        return 1
+    finally:
+        tunnel.stop(active)
 
 
 def _gui() -> int:

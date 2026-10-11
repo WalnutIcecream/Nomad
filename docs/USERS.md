@@ -479,12 +479,32 @@ nomad status <world-id>             # who hosts now
 nomad worlds                        # list worlds with live host status
 nomad usage                         # approximate local usage counters
 nomad gui                           # launch the desktop window
+nomad tunnel set none|playit        # choose how to port-forward
+nomad tunnel status                 # show the active tunnel method
+nomad tunnel test                   # open the tunnel and print its address
 ```
 
 Environment setup: `python -m pip install -e ".[dev]"` (core + tests),
 `python -m pip install -e ".[ui]"` (adds the PySide6 desktop window, opened with
 `nomad gui`), or `python -m pip install -e ".[ui,secure]"` (adds OS-keychain
 credential storage). Requires Python ≥ 3.11 and Java 21 to host.
+
+## Port forwarding (tunnels)
+
+By default Nomad publishes whatever is in `NOMAD_PUBLIC_ADDRESS` — a manual
+port-forward or a LAN address. To make a world reachable without touching your
+router, switch to the playit.gg tunnel:
+
+```bash
+nomad tunnel set playit
+```
+
+Then set the agent path and secret key (`NOMAD_TUNNEL_PLAYIT_BIN`,
+`NOMAD_TUNNEL_PLAYIT_SECRET`), or fill them in **Settings → Port forwarding**.
+When you press Play, Nomad runs the playit agent, publishes the address it is
+assigned in the world lease, and friends join through that address — the host
+sees it in the status line, and `nomad status <id>` shows it to everyone else.
+Check the setup with `nomad tunnel test`.
 
 ## Advanced: editing the raw connection values
 
