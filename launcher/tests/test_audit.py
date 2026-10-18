@@ -25,9 +25,7 @@ def _settings(tmp_path: Path, enabled: bool = True) -> LauncherSettings:
 def test_record_writes_provenance_without_secrets(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     audit.configure(settings)
-    audit.record(
-        "acquire", backend="r2", target="bucket", world="w1", outcome="ok"
-    )
+    audit.record("acquire", backend="r2", target="bucket", world="w1", outcome="ok")
 
     log = tmp_path / "logs" / "audit.log"
     assert log.exists()
@@ -62,7 +60,6 @@ def test_audit_file_is_owner_only(tmp_path: Path) -> None:
 
 def test_store_records_acquire_and_release(tmp_path: Path) -> None:
     from launcher.cloud import WorldStore
-
     from launcher.tests.fake_s3 import FakeS3Client
 
     audit.configure(_settings(tmp_path))

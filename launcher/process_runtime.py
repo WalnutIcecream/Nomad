@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from launcher.minecraft.process import ProcessHandle
 

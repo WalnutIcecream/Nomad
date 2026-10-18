@@ -149,9 +149,7 @@ class WorldCard(QFrame):
         state = self._state
         self.setStyleSheet(theme.card_style(theme.status_color(state)))
         self.status_label.setText(f"● {self._status_text()}")
-        self.status_label.setStyleSheet(
-            f"color: {theme.status_color(state)}; font-weight: 600;"
-        )
+        self.status_label.setStyleSheet(f"color: {theme.status_color(state)}; font-weight: 600;")
         self.detail_label.setText(self._detail_text())
         self._update_action()
 

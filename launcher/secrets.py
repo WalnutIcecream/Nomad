@@ -83,9 +83,7 @@ def redact(text: str | None) -> str:
     """Return ``text`` with anything credential-shaped masked."""
     if not text:
         return text or ""
-    out = _URL_USERINFO.sub(
-        lambda m: f"{m.group('scheme')}{m.group('user')}:{REDACTED}@", text
-    )
+    out = _URL_USERINFO.sub(lambda m: f"{m.group('scheme')}{m.group('user')}:{REDACTED}@", text)
     out = _AWS4.sub(f"AWS4-HMAC-SHA256 {REDACTED}", out)
     out = _AUTH_HEADER.sub(f"Authorization: {REDACTED}", out)
     out = _AWS_KEY_ID.sub(REDACTED, out)

@@ -30,7 +30,6 @@ import datetime
 import hashlib
 import hmac
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from launcher import audit
+from launcher.download import ProgressFn, sha256_file
 
 _SERVICE = "s3"
 _REGION = "auto"  # R2 uses "auto" as the signing region
@@ -110,6 +110,7 @@ def _classify_connection_error(exc: Exception, provider_label: str) -> Connectio
 # SigV4 request signing (S3-compatible API)
 # --------------------------------------------------------------------------
 
+
 def _sign(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
@@ -132,19 +133,19 @@ class S3Client:
 
     # --- request plumbing -----------------------------------------------
 
-    def _request(
+    def _signed_request(
         self,
         method: str,
         key: str,
         *,
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, str], bytes]:
+    ) -> urllib.request.Request:
         headers = {k.lower(): v for k, v in (headers or {}).items()}
         payload_hash = hashlib.sha256(body or b"").hexdigest()
         host = urllib.parse.urlparse(self.endpoint).netloc
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.UTC)
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
 
@@ -159,16 +160,26 @@ class S3Client:
             + f"x-amz-content-sha256:{payload_hash}\n"
             + f"x-amz-date:{amz_date}\n"
         )
-        signed_headers = (
-            ";".join(sorted_names) + ";x-amz-content-sha256;x-amz-date"
-        )
+        signed_headers = ";".join(sorted_names) + ";x-amz-content-sha256;x-amz-date"
 
         canonical_request = "\n".join(
-            [method, canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash]
+            [
+                method,
+                canonical_uri,
+                canonical_query,
+                canonical_headers,
+                signed_headers,
+                payload_hash,
+            ]
         )
         scope = f"{date_stamp}/{_REGION}/{_SERVICE}/aws4_request"
         string_to_sign = "\n".join(
-            ["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical_request.encode()).hexdigest()]
+            [
+                "AWS4-HMAC-SHA256",
+                amz_date,
+                scope,
+                hashlib.sha256(canonical_request.encode()).hexdigest(),
+            ]
         )
         signature = hmac.new(
             _signing_key(self.secret_key, date_stamp),
@@ -188,17 +199,53 @@ class S3Client:
         }
 
         url = f"{self.endpoint}/{urllib.parse.quote(self.bucket, safe='')}/{key}"
-        request = urllib.request.Request(url, data=body, method=method, headers=final_headers)
+        return urllib.request.Request(url, data=body, method=method, headers=final_headers)
+
+    def _request(
+        self,
+        method: str,
+        key: str,
+        *,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        request = self._signed_request(method, key, body=body, headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 # HTTP header names are case-insensitive (RFC 9110) but servers
                 # vary: SeaweedFS returns ETag on PUT and Etag on GET. Lowercase
                 # them so lookups like .get("etag") work regardless of sender.
-                headers = {k.lower(): v for k, v in response.headers.items()}
-                return response.status, headers, response.read()
+                resp_headers = {k.lower(): v for k, v in response.headers.items()}
+                return response.status, resp_headers, response.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise CloudError(exc.code, detail[:500]) from exc
+
+    def get_to_file(self, key: str, dest: Path, on_progress: ProgressFn | None = None) -> bool:
+        """Stream an object to ``dest``. False when the object does not exist."""
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        request = self._signed_request("GET", key)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                length = response.headers.get("Content-Length")
+                total = int(length) if length is not None and length.isdigit() else None
+                done = 0
+                with dest.open("wb") as out:
+                    while True:
+                        block = response.read(1 << 16)
+                        if not block:
+                            break
+                        out.write(block)
+                        done += len(block)
+                        if on_progress is not None:
+                            on_progress(done, total)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise CloudError(exc.code, detail[:500]) from exc
+        return True
 
     # --- object operations -----------------------------------------------
 
@@ -241,7 +288,9 @@ class S3Client:
             _, resp_headers, _ = self._request("PUT", key, body=body, headers=headers)
         except CloudError as exc:
             if exc.status_code == 412:
-                raise LeaseError(exc.status_code, "conditional write failed (lost the race)") from exc
+                raise LeaseError(
+                    exc.status_code, "conditional write failed (lost the race)"
+                ) from exc
             raise
         return resp_headers.get("etag", "")
 
@@ -253,8 +302,9 @@ class S3Client:
 # Lease model + protocol
 # --------------------------------------------------------------------------
 
+
 def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.datetime.now(datetime.UTC)
 
 
 def _iso(value: datetime.datetime) -> str:
@@ -271,7 +321,7 @@ class Lease:
     etag: str | None = None
 
     @classmethod
-    def from_object(cls, raw: bytes, etag: str | None = None) -> "Lease":
+    def from_object(cls, raw: bytes, etag: str | None = None) -> Lease:
         data = json.loads(raw.decode("utf-8"))
         return cls(
             status=data.get("status", "active"),
@@ -392,11 +442,15 @@ class WorldStore:
         player_name: str = "me",
         usage: UsageCounter | None = None,
         backend: str = "storage",
+        lease_seconds: int = 300,
     ) -> None:
         self.client = client
         self.player_name = player_name
         self.usage = usage
         self.backend = backend
+        # How long a lease lasts before it needs renewing; a crashed host frees
+        # the world automatically once this passes without a heartbeat.
+        self.lease_seconds = lease_seconds
 
     def _track(self, **delta: int) -> None:
         if self.usage is not None:
@@ -463,7 +517,7 @@ class WorldStore:
             holder=self.player_name,
             address=address,
             acquired_at=_iso(now),
-            expires_at=_iso(now + datetime.timedelta(seconds=LEASE_SECONDS)),
+            expires_at=_iso(now + datetime.timedelta(seconds=self.lease_seconds)),
         )
         body = lease.to_bytes()
 
@@ -510,10 +564,13 @@ class WorldStore:
             holder=lease.holder,
             address=lease.address,
             acquired_at=lease.acquired_at,
-            expires_at=_iso(now + datetime.timedelta(seconds=LEASE_SECONDS)),
+            expires_at=_iso(now + datetime.timedelta(seconds=self.lease_seconds)),
         )
         etag = self.client.put_object(
-            lease_key(world_id), updated.to_bytes(), if_match=lease.etag or "", content_type="application/json"
+            lease_key(world_id),
+            updated.to_bytes(),
+            if_match=lease.etag or "",
+            content_type="application/json",
         )
         updated.etag = etag
         return updated
@@ -529,34 +586,38 @@ class WorldStore:
             expires_at=lease.expires_at,
         )
         self.client.put_object(
-            lease_key(world_id), released.to_bytes(), if_match=lease.etag or "", content_type="application/json"
+            lease_key(world_id),
+            released.to_bytes(),
+            if_match=lease.etag or "",
+            content_type="application/json",
         )
         audit.record("release", backend=self.backend, world=world_id, outcome="ok")
 
     # --- world blob ------------------------------------------------------
 
-    def download_world(self, world_id: str, dest: Path) -> bool:
+    def download_world(
+        self, world_id: str, dest: Path, on_progress: ProgressFn | None = None
+    ) -> bool:
         """Download the shared world archive into ``dest``. False if none yet.
 
-        If a companion ``world.sha256`` object exists, the downloaded bytes are
+        If a companion ``world.sha256`` object exists, the downloaded file is
         verified against it and a mismatch raises ``CloudError``. Verification
         is skipped for worlds uploaded before the hash object existed.
         """
-        raw = self.client.get_object_if_exists(world_key(world_id))
-        if raw is None:
+        dest = Path(dest)
+        if not self.client.get_to_file(world_key(world_id), dest, on_progress=on_progress):
             return False
         expected_raw = self.client.get_object_if_exists(world_hash_key(world_id))
         if expected_raw is not None:
             expected = expected_raw.decode("utf-8").strip()
-            actual = hashlib.sha256(raw).hexdigest()
+            actual = sha256_file(dest)
             if expected and actual != expected:
+                dest.unlink(missing_ok=True)
                 raise CloudError(
                     422,
                     f"world integrity check failed for {world_id}: "
                     f"expected {expected[:12]}, got {actual[:12]}",
                 )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(raw)
         self._track(download_count=1)
         return True
 
@@ -574,6 +635,3 @@ class WorldStore:
             world_hash_key(world_id), digest.encode("utf-8"), content_type="text/plain"
         )
         self._track(upload_count=1, uploaded_bytes=size)
-
-
-LEASE_SECONDS = 300

@@ -21,10 +21,13 @@ import threading
 import time
 from pathlib import Path
 
-from launcher.cloud import CloudError, Lease, LeaseError, WorldStore
+from launcher import java
+from launcher.archive import extract_tar
+from launcher.cloud import CloudError, Lease, LeaseError
 from launcher.manifest import ServerManifest, create_archive, load_manifest
 from launcher.minecraft.vanilla import VanillaMinecraftRuntime
 from launcher.process_runtime import ProcessRuntime
+from launcher.storage import WorldStoreProtocol
 from launcher.sync.worldfolder import ensure_world_level
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,7 @@ class HostAgent:
     def __init__(
         self,
         settings,
-        store: WorldStore,
+        store: WorldStoreProtocol,
         world: dict,
         runtime: VanillaMinecraftRuntime | ProcessRuntime | None = None,
         progress=None,
@@ -55,6 +58,7 @@ class HostAgent:
         self.lease: Lease | None = None
         self._tunnel = None
         self._active_tunnel = None
+        self._java_path = self.settings.java_path
         self.published_address: str | None = None
         self.stop_requested = threading.Event()
         self.upload_error: str | None = None
@@ -76,11 +80,50 @@ class HostAgent:
             logger.warning("could not build tunnel provider (%s); using static address", exc)
             return None
 
+    def _download_reporter(self, label: str):
+        """A progress callback that logs roughly every 20% (GUI bars come later)."""
+        state = {"pct": -1}
+
+        def report(done: int, total: int | None) -> None:
+            if not total:
+                return
+            pct = done * 100 // total
+            if pct == 100 or pct >= state["pct"] + 20:
+                state["pct"] = pct
+                logger.info("downloading %s: %d%%", label, pct)
+
+        return report
+
+    def _resolve_java(self) -> str:
+        """A usable Java path, provisioning Temurin 21 when the machine has none."""
+        configured = self.settings.java_path
+        major = java.java_major(configured)
+        if major is not None and major >= 21:
+            return configured
+        provisioned = java.provisioned_java(self.settings)
+        if provisioned is not None:
+            return str(provisioned)
+        self._progress("downloading_java")
+        logger.info("no usable Java 21 found; provisioning one (one time download)")
+        return str(java.ensure_java(self.settings, on_progress=self._download_reporter("Java")))
+
     # --- entry ----------------------------------------------------------
 
     def host(self) -> int:
         """Run the full host session. Returns 0 on clean stop, 1 on failure."""
         minecraft_version = self.world.get("minecraft_version") or self.settings.minecraft_version
+
+        # 0. Preflight: fail fast and clearly if this machine cannot host, before
+        # we acquire the lease or pull a world.
+        from launcher.doctor import preflight
+
+        problems = [check for check in preflight(self.settings) if not check.ok]
+        if problems:
+            for check in problems:
+                logger.error("cannot host: %s - %s", check.name, check.detail)
+                if check.fix:
+                    logger.error("  fix: %s", check.fix)
+            return 1
 
         # 1. Tunnel + lease. Open the tunnel first so the address we publish in
         # the lease is the one friends can actually reach.
@@ -116,7 +159,9 @@ class HostAgent:
             self._progress("pulling")
             self.run_dir.mkdir(parents=True, exist_ok=True)
             archive = self.run_dir.parent / f"{self.world_id}.tar.gz"
-            if self.store.download_world(self.world_id, archive):
+            if self.store.download_world(
+                self.world_id, archive, on_progress=self._download_reporter("world")
+            ):
                 self._extract(archive, self.run_dir)
                 archive.unlink(missing_ok=True)
             else:
@@ -126,6 +171,7 @@ class HostAgent:
             # game-agnostic (its own command + include/exclude); without one we
             # fall back to the vanilla Minecraft layout/runtime.
             self.manifest = load_manifest(self.run_dir)
+            provided_runtime = self.runtime is not None
             runtime = self._select_runtime()
             self.runtime = runtime
 
@@ -134,10 +180,17 @@ class HostAgent:
                 minecraft_version = (
                     self.world.get("minecraft_version") or self.settings.minecraft_version
                 )
+                try:
+                    # An explicitly injected runtime manages its own Java; only
+                    # provision one when Nomad picked the vanilla runtime itself.
+                    self._java_path = (
+                        self.settings.java_path if provided_runtime else self._resolve_java()
+                    )
+                except Exception as exc:
+                    logger.error("could not provision Java: %s", exc)
+                    return 1
                 runtime.install(minecraft_version, self.settings.install_dir)
-                ok, reason = runtime.validate(
-                    self.settings.install_dir, self.settings.java_path
-                )
+                ok, reason = runtime.validate(self.settings.install_dir, self._java_path)
                 if not ok:
                     logger.error("server validation failed: %s", reason)
                     return 1
@@ -158,7 +211,7 @@ class HostAgent:
                 self.settings.install_dir,
                 self.run_dir,
                 self.settings.server_properties(),
-                self.settings.java_path,
+                self._java_path,
                 self.settings.memory,
             )
 
@@ -214,10 +267,11 @@ class HostAgent:
             return self.runtime
         if self.manifest is not None and self.manifest.is_generic:
             return ProcessRuntime(self.manifest.server_command, self.manifest.stop_command)
-        return VanillaMinecraftRuntime()
+        return VanillaMinecraftRuntime(on_progress=self._download_reporter("server.jar"))
 
     def _stop_server(self, handle) -> None:
         logger.info("stopping server…")
+        assert self.runtime is not None
         try:
             self.runtime.stop(handle)
             handle.wait(timeout=self.settings.stop_timeout_seconds)
@@ -296,20 +350,4 @@ class HostAgent:
     def _extract(archive: Path, dest: Path) -> None:
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive, "r:gz") as tar:
-            for member in tar.getmembers():
-                if member.issym() or member.islnk():
-                    continue
-                target = (dest / member.name).resolve()
-                if not str(target).startswith(str(dest.resolve())):
-                    raise RuntimeError(f"unsafe archive member: {member.name}")
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                elif member.isfile():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    src = tar.extractfile(member)
-                    if src is None:
-                        continue
-                    with src, open(target, "wb") as out:
-                        shutil.copyfileobj(src, out)
+        extract_tar(archive, dest)

@@ -116,9 +116,7 @@ class PlayitTunnelProvider(TunnelProvider):
         found = shutil.which("playit")
         if found:
             return found
-        raise TunnelError(
-            "playit.gg agent not found. Install it or set NOMAD_TUNNEL_PLAYIT_BIN."
-        )
+        raise TunnelError("playit.gg agent not found. Install it or set NOMAD_TUNNEL_PLAYIT_BIN.")
 
     def _wait_for_address(self, process: subprocess.Popen[str]) -> str | None:
         lines: list[str] = []

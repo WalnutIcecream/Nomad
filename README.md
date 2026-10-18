@@ -10,7 +10,36 @@ The world stays. The host changes.
 Project docs: [docs/USERS.md](docs/USERS.md) (user guide),
 [docs/TECHNICAL.md](docs/TECHNICAL.md) (protocol and failure modes),
 [docs/USP.md](docs/USP.md) (selling points), [docs/MARKETING.md](docs/MARKETING.md),
-[CHANGELOG.md](CHANGELOG.md), [SECURITY.md](SECURITY.md), [llms.txt](llms.txt).
+[CHANGELOG.md](CHANGELOG.md), [SECURITY.md](SECURITY.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md),
+[llms.txt](llms.txt).
+
+## Download & install
+
+Grab the latest build from the **Releases** page:
+
+- **Windows** — `Nomad-Setup-<version>.exe` (Start-menu entry and uninstaller) or
+  the portable `Nomad-<version>-win64.zip`.
+- **Linux** — `Nomad-<version>-x86_64.AppImage` (`chmod +x` it, then run).
+- `SHA256SUMS.txt` lists a checksum for every artifact.
+
+The download is self-contained — a bundled Python runtime and a Temurin JRE 21 —
+so there is nothing to install first. If the runtime is ever missing, Nomad
+provisions Java 21 itself on the first host.
+
+## Quickstart
+
+1. Install Nomad (above) and open it.
+2. Follow the setup wizard once to connect **shared storage** — Cloudflare R2, or
+   your own S3/Garage server. One person in the group does this; everyone else
+   points at the same storage.
+3. Press **Create World**, then share the **World ID** it gives you.
+4. Whoever wants to play presses **PLAY** — that PC hosts. Everyone else presses
+   **JOIN**. When the host stops, the world is saved and the next player
+   continues it.
+
+Prefer the command line? `nomad storage set r2|server`, then `nomad new <name>`,
+then `nomad play <world-id>`. Run `nomad doctor` any time to check the machine.
 
 ## How it works
 
@@ -185,7 +214,8 @@ nomad manifest check ./my-server    # preview what would sync
 
 ## Setup
 
-Requires Python >= 3.11 and a Java 21 runtime for hosting.
+Running from source needs Python >= 3.11. Java 21 is provided automatically for
+hosting; set `NOMAD_JAVA_PATH` to use your own JVM instead.
 
 ```bash
 python -m pip install -e ".[dev]"        # core + test deps
@@ -213,6 +243,8 @@ nomad worlds                     # list worlds with host status
 nomad usage                      # local usage counters
 nomad gui                        # launch the desktop window
 nomad tunnel set|status|test     # choose/inspect/test port-forwarding
+nomad doctor                     # check that this machine can host
+nomad diagnostics                # print a redacted support bundle
 ```
 
 `nomad gui` (or `python -m launcher.ui`) launches the PySide6 window. The same
@@ -278,8 +310,29 @@ service required.
 with an embedded Temurin JRE 21. Run it from the repo root with PyInstaller
 installed; the JRE archive is downloaded once and cached under
 `scripts/app/.cache`. Produces a single `nomad` binary (console) plus a `java/`
-runtime and a writable `data/` directory — the GUI opens through `nomad gui`, so
-there is no separate GUI executable on any platform.
+runtime, a writable `data/` directory, and — on Linux — a `.desktop` entry and an
+AppImage-ready layout. The GUI opens through `nomad gui`, so there is no separate
+GUI executable on any platform.
+
+Releases are built by `.github/workflows/release.yml`: pushing a `v*` tag builds
+the Windows installer (Start-menu entry, uninstaller) and portable zip, plus the
+Linux AppImage, in CI; writes `SHA256SUMS.txt`; and publishes a GitHub Release.
+
+## Troubleshooting
+
+- **"Storage unavailable" / can't access the bucket** — open Settings → Storage
+  and press **Test connection**; the message says whether it is permissions, a
+  bucket name, or reachability. `nomad storage test` does the same from the CLI.
+- **Friends can't connect** — the host has no reachable address. Set
+  `NOMAD_PUBLIC_ADDRESS` to a port-forwarded `host:port`, or use a tunnel:
+  `nomad tunnel set playit`.
+- **"Someone else may be hosting"** — run `nomad status <id>`; another host holds
+  the lease. Join instead, or wait for it to expire.
+- **"Your world couldn't be synced"** — the upload failed, so the world stays on
+  this machine and the lease is kept (it expires on its own). Your local copy is
+  safe; retry once storage is reachable.
+- **Anything else** — run `nomad doctor` (Java, disk, port, storage, tunnel) and
+  `nomad diagnostics` (a redacted bundle) before reporting an issue.
 
 ## Design constraints
 

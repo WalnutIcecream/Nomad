@@ -9,7 +9,6 @@ from launcher.cloud import (
     S3Client,
     WorldStore,
     lease_key,
-    world_key,
 )
 
 
@@ -44,6 +43,19 @@ class FakeS3Client(S3Client):
         if key not in self.objects:
             return None
         return self.objects[key][0]
+
+    def get_to_file(self, key: str, dest, on_progress=None) -> bool:
+        if key not in self.objects:
+            return False
+        data = self.objects[key][0]
+        from pathlib import Path
+
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        if on_progress is not None:
+            on_progress(len(data), len(data))
+        return True
 
     def get_object_etag(self, key: str) -> tuple[bytes, str | None]:
         if key not in self.objects:

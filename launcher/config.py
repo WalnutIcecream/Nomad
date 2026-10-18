@@ -165,6 +165,9 @@ class LauncherSettings(BaseSettings):
     # The playit.gg agent secret key (linked once from the playit.gg dashboard).
     tunnel_playit_secret: SecretStr = SecretStr("")
 
+    # Whether the one-time welcome tour has been shown.
+    onboarding_done: bool = False
+
     @property
     def endpoint_url(self) -> str:
         if self.r2_endpoint_url:
@@ -221,6 +224,7 @@ _FILE_FIELDS: tuple[str, ...] = (
     "public_address",
     "tunnel_provider",
     "tunnel_playit_bin",
+    "onboarding_done",
     "audit_log",
 )
 

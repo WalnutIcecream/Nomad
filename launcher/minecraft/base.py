@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Protocol
-
-from launcher.server_properties import ServerProperties
+from typing import Protocol
 
 from launcher.minecraft.process import ProcessHandle
+from launcher.server_properties import ServerProperties
 
 
 class MinecraftRuntime(Protocol):

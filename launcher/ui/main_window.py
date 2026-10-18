@@ -14,11 +14,14 @@ import logging
 import threading
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -27,14 +30,19 @@ from PySide6.QtWidgets import (
 
 from launcher.agent import HostAgent
 from launcher.cloud import UsageCounter
-from launcher.config import LauncherSettings
+from launcher.config import LauncherSettings, save_settings_file
 from launcher.registry import WorldRegistry
-from launcher.storage import WorldStoreProtocol, build_store as build_backend, provider_label
+from launcher.storage import WorldStoreProtocol, provider_label
+from launcher.storage import build_store as build_backend
 from launcher.ui import theme
+from launcher.ui.about import AboutDialog
 from launcher.ui.connection_dialog import ConnectionDialog
 from launcher.ui.dialogs import JoinWorldDialog, NewWorldDialog
+from launcher.ui.errors import show_error
+from launcher.ui.onboarding import OnboardingDialog
 from launcher.ui.settings_dialog import SettingsDialog
 from launcher.ui.storage_wizard import StorageWizard
+from launcher.ui.tray import Tray
 from launcher.ui.widgets import WorldCard
 
 logger = logging.getLogger(__name__)
@@ -44,6 +52,7 @@ POLL_INTERVAL_MS = 3000
 # Host-lifecycle phases (from HostAgent) mapped onto card states.
 PHASE_STATES = {
     "tunneling": "starting",
+    "downloading_java": "starting",
     "starting": "starting",
     "pulling": "starting",
     "booting": "starting",
@@ -73,6 +82,7 @@ class MainWindow(QWidget):
     worlds_changed = Signal()
     status_message = Signal(str)
     progress = Signal(str, str)  # world_id, phase
+    error = Signal(str, str)  # title, message
 
     def __init__(self, settings: LauncherSettings, prompt_settings: bool = True) -> None:
         super().__init__()
@@ -87,6 +97,7 @@ class MainWindow(QWidget):
         self.worlds_changed.connect(self._reload)
         self.status_message.connect(self._show_status)
         self.progress.connect(self._on_progress)
+        self.error.connect(self._on_error)
         self._build_ui()
         self._reload()
 
@@ -94,14 +105,46 @@ class MainWindow(QWidget):
         self._poll.timeout.connect(self._refresh_statuses)
         self._poll.start(POLL_INTERVAL_MS)
 
-        if self.store is None and prompt_settings:
-            QTimer.singleShot(0, self._open_setup)
+        self.prompt_settings = prompt_settings
+        QTimer.singleShot(0, self._maybe_first_run)
+        QShortcut(QKeySequence.HelpContents, self, activated=self._open_about)
+
+        self.tray = Tray(self)
+        if self.tray.available:
+            self.tray.show()
+
+    def show_normal(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_app(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _maybe_first_run(self) -> None:
+        """Show the welcome tour once, then open storage setup if unconfigured."""
+        if not self.settings.onboarding_done:
+            self._run_onboarding()
+        if self.store is None and self.prompt_settings:
+            self._open_setup()
+
+    def _run_onboarding(self) -> None:
+        if OnboardingDialog(self).exec() == OnboardingDialog.DialogCode.Accepted:
+            self.settings.onboarding_done = True
+            save_settings_file(self.settings)
+
+    def _open_about(self) -> None:
+        AboutDialog(self.settings, parent=self).exec()
 
     # --- UI -------------------------------------------------------------
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(theme.SPACE_LARGE, theme.SPACE_LARGE, theme.SPACE_LARGE, theme.SPACE_LARGE)
+        root.setContentsMargins(
+            theme.SPACE_LARGE, theme.SPACE_LARGE, theme.SPACE_LARGE, theme.SPACE_LARGE
+        )
         root.setSpacing(theme.SPACE)
 
         header = QHBoxLayout()
@@ -114,6 +157,13 @@ class MainWindow(QWidget):
         self.storage_button.setObjectName("ghost")
         self.storage_button.clicked.connect(self._prompt_settings)
         header.addWidget(self.storage_button)
+
+        about_button = QPushButton("ⓘ")
+        about_button.setObjectName("ghost")
+        about_button.setFixedWidth(32)
+        about_button.setToolTip("About Nomad (F1)")
+        about_button.clicked.connect(self._open_about)
+        header.addWidget(about_button)
 
         join_button = QPushButton("Join a world")
         join_button.clicked.connect(self._on_join_world)
@@ -129,6 +179,12 @@ class MainWindow(QWidget):
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         root.addWidget(self.status_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # indeterminate
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setVisible(False)
+        root.addWidget(self.progress_bar)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -151,7 +207,9 @@ class MainWindow(QWidget):
 
     def _update_storage_indicator(self) -> None:
         if self.store is None:
-            self.storage_button.setText(f"● {provider_label(self.settings.storage_backend)} — not set up")
+            self.storage_button.setText(
+                f"● {provider_label(self.settings.storage_backend)} — not set up"
+            )
             self.storage_button.setStyleSheet(f"color: {theme.STATUS_ERROR};")
             self.storage_button.setToolTip("Open storage settings to finish setup")
         else:
@@ -239,7 +297,8 @@ class MainWindow(QWidget):
         self.worlds_changed.emit()
 
     def _on_play(self, world: dict) -> None:
-        if self.store is None:
+        store = self.store
+        if store is None:
             self.status_message.emit("Set up storage first — worlds need somewhere to live.")
             self._open_setup()
             return
@@ -254,7 +313,7 @@ class MainWindow(QWidget):
             self.progress.emit(world_id, phase)
 
         def work() -> None:
-            agent = HostAgent(self.settings, self.store, world, progress=report)
+            agent = HostAgent(self.settings, store, world, progress=report)
             self.active_agents[world_id] = agent
             try:
                 code = agent.host()
@@ -263,13 +322,24 @@ class MainWindow(QWidget):
                         "Your world couldn't be synced. Your current copy is still "
                         "available on this computer."
                     )
+                    self.error.emit(
+                        "Sync failed",
+                        "Your world couldn't be saved to shared storage. Your local "
+                        "copy is safe — check storage and press PLAY again.",
+                    )
                 elif code == 0:
                     self.status_message.emit(
                         f"{world['name']} stopped and saved. Another player can host it now."
                     )
+                    self.tray.notify("Nomad", f"{world['name']} stopped and saved.")
                 else:
                     self.status_message.emit(
                         f"Couldn't start {world['name']} — someone else may be hosting it."
+                    )
+                    self.error.emit(
+                        "Couldn't start",
+                        f"{world['name']} didn't start. Someone else may be hosting it; "
+                        "run 'nomad doctor' if this keeps happening.",
                     )
             except Exception as exc:
                 self.status_message.emit(f"Hosting failed: {exc}")
@@ -284,6 +354,7 @@ class MainWindow(QWidget):
         state = PHASE_STATES.get(phase)
         if state is None:
             return
+        self.progress_bar.setVisible(state in ("starting", "syncing", "stopping"))
         if state == "ready":
             self.states.pop(world_id, None)
         else:
@@ -298,6 +369,7 @@ class MainWindow(QWidget):
             hosting = f"You're hosting. Friends join at {address}."
         messages = {
             "tunneling": "Opening a tunnel…",
+            "downloading_java": "Downloading Java…",
             "starting": f"Starting {name}…",
             "pulling": "Loading the world…",
             "booting": "Starting the server…",
@@ -308,6 +380,8 @@ class MainWindow(QWidget):
         }
         if phase in messages:
             self.status_message.emit(messages[phase])
+        if phase == "hosting":
+            self.tray.notify("Nomad", f"You're hosting {name}. Friends can join now.")
 
     def _on_stop(self, world: dict) -> None:
         agent = self.active_agents.get(world["id"])
@@ -385,3 +459,6 @@ class MainWindow(QWidget):
 
     def _show_status(self, message: str) -> None:
         self.status_label.setText(message)
+
+    def _on_error(self, title: str, message: str) -> None:
+        show_error(self, title, message, self.settings)

@@ -39,9 +39,9 @@ import fnmatch
 import json
 import os
 import tarfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 DEFAULT_MANIFEST_NAME = "nomad.json"
 
@@ -80,7 +80,8 @@ def load_manifest(root: Path) -> ServerManifest | None:
     if not isinstance(data, dict):
         return None
 
-    server = data.get("server") if isinstance(data.get("server"), dict) else {}
+    raw_server = data.get("server")
+    server: dict = raw_server if isinstance(raw_server, dict) else {}
     command = server.get("command")
     if isinstance(command, str):
         command = [command]
@@ -93,7 +94,9 @@ def load_manifest(root: Path) -> ServerManifest | None:
         include=[str(p) for p in data.get("include", []) if isinstance(p, str)],
         exclude=[str(p) for p in data.get("exclude", []) if isinstance(p, str)],
         server_command=command,
-        stop_command=server.get("stop_command") if isinstance(server.get("stop_command"), str) else None,
+        stop_command=server.get("stop_command")
+        if isinstance(server.get("stop_command"), str)
+        else None,
         port=int(server["port"]) if isinstance(server.get("port"), int) else None,
     )
 

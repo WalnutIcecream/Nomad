@@ -23,7 +23,7 @@ class R2WorldStore(WorldStoreProtocol):
         self._store = store
 
     @classmethod
-    def build(cls, settings, usage: UsageCounter | None = None) -> "R2WorldStore":
+    def build(cls, settings, usage: UsageCounter | None = None) -> R2WorldStore:
         from launcher.secrets import secret_value
 
         access = secret_value(settings.r2_access_key)
@@ -37,7 +37,13 @@ class R2WorldStore(WorldStoreProtocol):
             settings.r2_bucket,
         )
         return cls(
-            WorldStore(client, player_name=settings.player_name, usage=usage, backend=cls.name)
+            WorldStore(
+                client,
+                player_name=settings.player_name,
+                usage=usage,
+                backend=cls.name,
+                lease_seconds=settings.lease_duration_seconds,
+            )
         )
 
     # --- WorldStoreProtocol ---------------------------------------------
@@ -54,8 +60,8 @@ class R2WorldStore(WorldStoreProtocol):
     def status(self, world_id: str) -> dict:
         return self._store.status(world_id)
 
-    def download_world(self, world_id: str, dest: Path) -> bool:
-        return self._store.download_world(world_id, dest)
+    def download_world(self, world_id: str, dest: Path, on_progress=None) -> bool:
+        return self._store.download_world(world_id, dest, on_progress=on_progress)
 
     def upload_world(self, world_id: str, archive: Path) -> None:
         self._store.upload_world(world_id, archive)

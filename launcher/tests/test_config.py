@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -140,8 +139,19 @@ def test_loading_registers_secrets_for_redaction(tmp_path: Path) -> None:
         assert "verysecretvalue123" not in secrets.redact(
             "failed with verysecretvalue123 in the message"
         )
-        assert "AKIAEXAMPLEACCESSKEY" not in secrets.redact(
-            "key AKIAEXAMPLEACCESSKEY used"
-        )
+        assert "AKIAEXAMPLEACCESSKEY" not in secrets.redact("key AKIAEXAMPLEACCESSKEY used")
     finally:
         secrets.clear_secrets()
+
+
+def test_onboarding_flag_round_trips(tmp_path: Path) -> None:
+    s = LauncherSettings(_env_file=None)
+    s.data_dir = tmp_path
+    assert s.onboarding_done is False
+    s.onboarding_done = True
+    save_settings_file(s)
+
+    loaded = LauncherSettings(_env_file=None)
+    loaded.data_dir = tmp_path
+    load_settings_file(loaded)
+    assert loaded.onboarding_done is True

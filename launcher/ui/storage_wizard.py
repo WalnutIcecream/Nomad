@@ -81,7 +81,9 @@ class StorageWizard(QDialog):
     def __init__(self, settings: LauncherSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.provider = settings.storage_backend if settings.storage_backend in PROVIDER_TITLES else "r2"
+        self.provider = (
+            settings.storage_backend if settings.storage_backend in PROVIDER_TITLES else "r2"
+        )
         self._testing = False
 
         self.setWindowTitle("Set up storage")
@@ -135,7 +137,9 @@ class StorageWizard(QDialog):
         question.setStyleSheet("font-weight: 600; margin-top: 6px;")
         layout.addWidget(question)
 
-        r2 = ChoiceCard("Cloudflare R2", "Easy cloud storage. Worlds are stored online so any player can host.")
+        r2 = ChoiceCard(
+            "Cloudflare R2", "Easy cloud storage. Worlds are stored online so any player can host."
+        )
         r2.clicked.connect(lambda: self._choose("r2"))
         layout.addWidget(r2)
         server = ChoiceCard(
@@ -187,11 +191,12 @@ class StorageWizard(QDialog):
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         layout.addWidget(self.advanced_toggle, alignment=Qt.AlignLeft)
         self.advanced_hint = QLabel(
-            "Leave the endpoint blank to use Cloudflare's default R2 endpoint "
-            "for your account."
+            "Leave the endpoint blank to use Cloudflare's default R2 endpoint for your account."
         )
         self.advanced_hint.setWordWrap(True)
-        self.advanced_hint.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: {theme.FONT_SMALL};")
+        self.advanced_hint.setStyleSheet(
+            f"color: {theme.TEXT_FAINT}; font-size: {theme.FONT_SMALL};"
+        )
         layout.addWidget(self.advanced_hint)
 
         self.help_toggle = QToolButton()
@@ -268,9 +273,7 @@ class StorageWizard(QDialog):
     def _show_credentials(self) -> None:
         self._load_values()
         is_r2 = self.provider == "r2"
-        self.cred_title.setText(
-            "Connect Cloudflare R2" if is_r2 else "Connect your server"
-        )
+        self.cred_title.setText("Connect Cloudflare R2" if is_r2 else "Connect your server")
         self.cred_intro.setText(
             "Cloudflare R2 stores your worlds online so any authorised Nomad "
             "player can take over hosting."
@@ -280,7 +283,9 @@ class StorageWizard(QDialog):
         )
         self.account_id.setVisible(is_r2)
         self._set_row_visible(self.form, self.account_id, is_r2)
-        self._set_row_visible(self.form, self.endpoint, not is_r2 or self.advanced_toggle.isChecked())
+        self._set_row_visible(
+            self.form, self.endpoint, not is_r2 or self.advanced_toggle.isChecked()
+        )
         self.advanced_toggle.setVisible(is_r2)
         self.advanced_hint.setVisible(is_r2 and self.advanced_toggle.isChecked())
         self.help_toggle.setVisible(not is_r2)
@@ -350,10 +355,14 @@ class StorageWizard(QDialog):
         self.account_id.setText(s.r2_account_id)
         self.endpoint.setText(s.r2_endpoint_url if self.provider == "r2" else s.server_endpoint_url)
         self.access_key.setText(
-            secret_value(s.r2_access_key) if self.provider == "r2" else secret_value(s.server_access_key)
+            secret_value(s.r2_access_key)
+            if self.provider == "r2"
+            else secret_value(s.server_access_key)
         )
         self.secret_key.setText(
-            secret_value(s.r2_secret_key) if self.provider == "r2" else secret_value(s.server_secret_key)
+            secret_value(s.r2_secret_key)
+            if self.provider == "r2"
+            else secret_value(s.server_secret_key)
         )
         self.bucket.setText(s.r2_bucket if self.provider == "r2" else s.server_bucket)
 

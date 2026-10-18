@@ -57,7 +57,7 @@ class WorldStoreProtocol(Protocol):
         """Public view: hosted/holder/address/expires_at."""
         ...
 
-    def download_world(self, world_id: str, dest: Path) -> bool:
+    def download_world(self, world_id: str, dest: Path, on_progress=None) -> bool:
         """Fetch the world blob into ``dest``. False if none exists yet."""
         ...
 

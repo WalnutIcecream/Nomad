@@ -17,7 +17,7 @@ from botocore.auth import S3SigV4Auth  # noqa: E402
 from botocore.awsrequest import AWSRequest  # noqa: E402
 from botocore.credentials import Credentials  # noqa: E402
 
-from launcher.cloud import S3Client, _REGION  # noqa: E402
+from launcher.cloud import _REGION, S3Client  # noqa: E402
 
 ENDPOINT = "https://00000000000000000000000000000000.r2.cloudflarestorage.com"
 ACCESS = "test-access"

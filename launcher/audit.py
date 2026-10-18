@@ -33,9 +33,7 @@ def configure(settings) -> None:
     path = Path(getattr(settings, "data_dir", Path.home() / ".nomad")) / "logs" / "audit.log"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
-            path, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
-        )
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         _logger.addHandler(handler)
         _logger.setLevel(logging.INFO)

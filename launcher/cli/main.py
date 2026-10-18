@@ -12,18 +12,23 @@ Commands:
     nomad usage                  approximate local usage counters
     nomad gui                    launch the desktop window
     nomad tunnel set|status|test choose how to port-forward (none | playit)
+    nomad doctor                 check that this machine can host
+    nomad diagnostics            print a redacted support bundle
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from launcher.config import LauncherSettings, load_settings_file
 from launcher.storage import PROVIDERS, provider_label
-from launcher.tunnel import PROVIDERS as TUNNEL_PROVIDERS, provider_label as tunnel_provider_label
+from launcher.tunnel import PROVIDERS as TUNNEL_PROVIDERS
+from launcher.tunnel import provider_label as tunnel_provider_label
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,7 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     new = subparsers.add_parser("new", help="create a world in the local registry")
     new.add_argument("name", help="world name")
-    new.add_argument("--version", default=None, help="Minecraft version (default: launcher default)")
+    new.add_argument(
+        "--version", default=None, help="Minecraft version (default: launcher default)"
+    )
 
     join = subparsers.add_parser("join", help="add a friend's world by its id")
     join.add_argument("world_id", help="world id (a UUID)")
@@ -64,15 +71,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("gui", help="launch the desktop window")
 
+    subparsers.add_parser("doctor", help="check that this machine can host")
+
+    diagnostics = subparsers.add_parser("diagnostics", help="print a redacted support bundle")
+    diagnostics.add_argument("--out", default=None, help="write to a file instead of stdout")
+
     manifest = subparsers.add_parser("manifest", help="inclusion manifest (nomad.json) tools")
     manifest_sub = manifest.add_subparsers(dest="manifest_command", required=True)
     manifest_init = manifest_sub.add_parser("init", help="write a starter nomad.json")
-    manifest_init.add_argument("directory", nargs="?", default=".", help="server directory (default: .)")
+    manifest_init.add_argument(
+        "directory", nargs="?", default=".", help="server directory (default: .)"
+    )
     manifest_init.add_argument("--name", default=None, help="manifest name")
     manifest_check = manifest_sub.add_parser("check", help="preview what the manifest syncs")
-    manifest_check.add_argument("directory", nargs="?", default=".", help="server directory (default: .)")
+    manifest_check.add_argument(
+        "directory", nargs="?", default=".", help="server directory (default: .)"
+    )
 
-    storage = subparsers.add_parser("storage", help="choose, inspect and verify the storage backend")
+    storage = subparsers.add_parser(
+        "storage", help="choose, inspect and verify the storage backend"
+    )
     storage_sub = storage.add_subparsers(dest="storage_command", required=True)
     storage_set = storage_sub.add_parser("set", help="select where worlds are stored")
     storage_set.add_argument(
@@ -98,10 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _settings() -> LauncherSettings:
-    from launcher import audit
+    from launcher import audit, logs
 
     settings = load_settings_file(LauncherSettings())
     audit.configure(settings)
+    logs.configure(settings)
     return settings
 
 
@@ -131,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
             return _usage(args)
         if args.command == "gui":
             return _gui()
+        if args.command == "doctor":
+            return _doctor()
+        if args.command == "diagnostics":
+            return _diagnostics(args)
         if args.command == "tunnel":
             if args.tunnel_command == "set":
                 return _tunnel_set(args)
@@ -243,6 +266,39 @@ def _join(args: argparse.Namespace) -> int:
     return 0
 
 
+@contextmanager
+def _stop_on_interrupt(agent):
+    """Route Ctrl-C to a graceful stop so the world is saved, not lost.
+
+    Setting ``stop_requested`` lets HostAgent run its normal stop -> upload ->
+    release path instead of unwinding past the upload. Where a SIGINT handler
+    cannot be installed (non-main thread, exotic platform), the default
+    behavior is left in place.
+    """
+    try:
+        previous = signal.getsignal(signal.SIGINT)
+    except (ValueError, OSError):
+        previous = None
+
+    def _handler(signum, frame):
+        agent.stop_requested.set()
+
+    installed = False
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        installed = True
+    except (ValueError, OSError):
+        pass
+    try:
+        yield
+    finally:
+        if installed and previous is not None:
+            try:
+                signal.signal(signal.SIGINT, previous)
+            except (ValueError, OSError):
+                pass
+
+
 def _play(args: argparse.Namespace) -> int:
     from launcher.agent import HostAgent
     from launcher.registry import WorldRegistry
@@ -267,7 +323,9 @@ def _play(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Hosting {world['name']}... press Ctrl-C to stop and push the world.")
-    return HostAgent(settings, store, world).host()
+    agent = HostAgent(settings, store, world)
+    with _stop_on_interrupt(agent):
+        return agent.host()
 
 
 def _manifest_init(args: argparse.Namespace) -> int:
@@ -339,7 +397,9 @@ def _storage_status() -> int:
     settings = _settings()
     print(f"storage: {provider_label(settings.storage_backend)} ({settings.storage_backend})")
     if settings.storage_backend == "r2":
-        endpoint = settings.endpoint_url if (settings.r2_account_id or settings.r2_endpoint_url) else ""
+        endpoint = (
+            settings.endpoint_url if (settings.r2_account_id or settings.r2_endpoint_url) else ""
+        )
         print(f"  endpoint: {endpoint or '(not set)'}")
         print(f"  bucket:   {settings.r2_bucket or '-'}")
     else:
@@ -375,7 +435,9 @@ def _usage(args: argparse.Namespace) -> int:
     usage = UsageCounter(settings.usage_file).snapshot()
     print("Approximate local storage usage:")
     print(f"  worlds tracked:    {usage['world_count']}")
-    print(f"  uploaded bytes:    {usage['uploaded_bytes']:,} ({usage['uploaded_bytes']/1_000_000:.2f} MB)")
+    print(
+        f"  uploaded bytes:    {usage['uploaded_bytes']:,} ({usage['uploaded_bytes'] / 1_000_000:.2f} MB)"
+    )
     print(f"  uploads:           {usage['upload_count']}")
     print(f"  downloads:         {usage['download_count']}")
     print(f"  api requests:      {usage['api_request_count']}")
@@ -410,7 +472,9 @@ def _tunnel_set(args: argparse.Namespace) -> int:
     save_settings_file(settings)
     print(f"tunnel set to: {tunnel_provider_label(args.provider)}")
     if args.provider == "playit":
-        print("Set NOMAD_TUNNEL_PLAYIT_BIN (agent path) and NOMAD_TUNNEL_PLAYIT_SECRET (secret key).")
+        print(
+            "Set NOMAD_TUNNEL_PLAYIT_BIN (agent path) and NOMAD_TUNNEL_PLAYIT_SECRET (secret key)."
+        )
     else:
         print("Friends reach your server at the public address shown in 'nomad config'.")
     print("Verify with 'nomad tunnel test'.")
@@ -437,7 +501,9 @@ def _tunnel_test() -> int:
     try:
         tunnel = build_tunnel(settings)
     except Exception as exc:
-        print(f"Could not configure the tunnel ({tunnel_provider_label(settings.tunnel_provider)}): {exc}")
+        print(
+            f"Could not configure the tunnel ({tunnel_provider_label(settings.tunnel_provider)}): {exc}"
+        )
         return 1
     try:
         active = tunnel.start(settings.server_port)
@@ -454,6 +520,40 @@ def _tunnel_test() -> int:
         return 1
     finally:
         tunnel.stop(active)
+
+
+def _diagnostics(args: argparse.Namespace) -> int:
+    from launcher.diagnostics import collect
+
+    settings = _settings()
+    text = collect(settings)
+    if args.out:
+        Path(args.out).expanduser().write_text(text + "\n", encoding="utf-8")
+        print(f"wrote diagnostics to {args.out}")
+        return 0
+    print(text)
+    return 0
+
+
+def _doctor() -> int:
+    from launcher.doctor import run_all
+
+    settings = _settings()
+    checks = run_all(settings)
+    failed = 0
+    for check in checks:
+        mark = "PASS" if check.ok else "FAIL"
+        print(f"[{mark}] {check.name}: {check.detail}")
+        if not check.ok:
+            failed += 1
+            if check.fix:
+                print(f"       -> {check.fix}")
+    print()
+    if failed:
+        print(f"{failed} check(s) failed.")
+        return 1
+    print("All checks passed — this machine can host.")
+    return 0
 
 
 def _gui() -> int:

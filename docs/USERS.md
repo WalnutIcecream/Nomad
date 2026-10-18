@@ -487,7 +487,8 @@ nomad tunnel test                   # open the tunnel and print its address
 Environment setup: `python -m pip install -e ".[dev]"` (core + tests),
 `python -m pip install -e ".[ui]"` (adds the PySide6 desktop window, opened with
 `nomad gui`), or `python -m pip install -e ".[ui,secure]"` (adds OS-keychain
-credential storage). Requires Python ≥ 3.11 and Java 21 to host.
+credential storage). Requires Python ≥ 3.11; Java 21 is provided automatically
+for hosting, or point `NOMAD_JAVA_PATH` at your own runtime.
 
 ## Port forwarding (tunnels)
 
@@ -529,6 +530,12 @@ values than step through a wizard.
 
 ## Diagnostics
 
+- **`nomad doctor`** — checks the whole machine end to end (data directory,
+  free disk, game port, Java 21, storage reachability, tunnel config) and prints
+  `PASS`/`FAIL` per line with the exact fix. Run it first when something is wrong.
+- **`nomad diagnostics`** — prints a redacted support bundle (versions, platform,
+  non-secret config, log tail) to paste into a bug report; `--out FILE` writes it
+  to a file. Credentials never appear — secret fields are shown only as set/unset.
 - **`nomad config`** — current backend, readiness, player name, published address.
 - **`nomad storage status`** — active backend, its settings (redacted), and a
   `ready: yes/no` check.

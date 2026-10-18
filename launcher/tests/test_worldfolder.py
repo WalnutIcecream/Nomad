@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from launcher.sync.worldfolder import (
@@ -141,12 +141,12 @@ def test_local_folder_modified_since_detects_changes(tmp_path: Path) -> None:
         if path.is_file():
             _age(path, 100)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=10)
+    cutoff = datetime.now(UTC) - timedelta(seconds=10)
     assert not local_folder_modified_since(folder, since=cutoff)
 
     # Touch a world file after the cutoff.
     region = folder / "region" / "r.0.0.mca"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     os.utime(region, (now.timestamp(), now.timestamp()))
     assert local_folder_modified_since(folder, since=cutoff)
 

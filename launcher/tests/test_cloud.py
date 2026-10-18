@@ -10,7 +10,9 @@ from launcher.cloud import LeaseError, S3Client, UsageCounter, WorldStore
 from launcher.tests.fake_s3 import FakeS3Client, lease_body
 
 
-def make_shared_store(player: str, client: FakeS3Client, usage: UsageCounter | None = None) -> WorldStore:
+def make_shared_store(
+    player: str, client: FakeS3Client, usage: UsageCounter | None = None
+) -> WorldStore:
     return WorldStore(client, player_name=player, usage=usage)
 
 
@@ -85,7 +87,7 @@ def test_expired_lease_can_be_stolen() -> None:
     raw, etag = client.objects[lease_key("world-1")]
     data = json.loads(raw.decode())
     data["expires_at"] = (
-        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+        datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=1)
     ).isoformat()
     client.objects[lease_key("world-1")] = (json.dumps(data).encode(), etag)
 
@@ -170,12 +172,12 @@ def test_usage_counter_tracks_operations(tmp_path: Path) -> None:
     usage = UsageCounter(tmp_path / "usage.json")
     store = make_shared_store("alice", client, usage=usage)
 
-    lease = store.acquire("world-1")        # +1 api, +1 world_count
-    lease = store.renew("world-1", lease)   # +1 api
-    store.release("world-1", lease)         # +1 api
+    lease = store.acquire("world-1")  # +1 api, +1 world_count
+    lease = store.renew("world-1", lease)  # +1 api
+    store.release("world-1", lease)  # +1 api
     archive = tmp_path / "w.tar.gz"
     archive.write_bytes(b"data" * 1000)
-    store.upload_world("world-1", archive)   # +1 upload, +4000 bytes
+    store.upload_world("world-1", archive)  # +1 upload, +4000 bytes
     store.download_world("world-1", tmp_path / "out.tar.gz")  # +1 download
 
     snap = usage.snapshot()
@@ -203,7 +205,9 @@ def test_etag_header_casing_is_ignored() -> None:
             payload = b'{"status":"active","holder":"alice"}'
             self.send_response(200)
             # SeaweedFS's actual behaviour: differ the header casing by method.
-            self.send_header("Etag" if self.command == "GET" else "ETag", '"2f8bb70a9fa97314f9141b082e24f10c"')
+            self.send_header(
+                "Etag" if self.command == "GET" else "ETag", '"2f8bb70a9fa97314f9141b082e24f10c"'
+            )
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)

@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,7 @@ class ProcessHandle:
             with self._lock:
                 new_lines = self._log_lines[position:]
                 position = len(self._log_lines)
-            for line in new_lines:
-                yield line
+            yield from new_lines
             if not self.is_running() and position >= len(self._log_lines):
                 break
             time.sleep(0.1)

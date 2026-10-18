@@ -8,6 +8,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `nomad doctor` checks the whole machine end to end (data directory, free disk,
+  game port, Java 21, storage reachability, tunnel configuration) and prints
+  `PASS`/`FAIL` per line with the exact fix for anything wrong.
+- Hosting now provisions its own Java: if the machine has no Java 21, Nomad
+  downloads a Temurin JRE 21 into its data directory once (cached) and uses it,
+  so a fresh computer can host with no manual setup. Downloads are resumable and
+  checksum-verified, and log progress as they go.
+- The desktop window shows the Nomad app icon, and packaged builds drop a Linux
+  `.desktop` entry plus icons into the bundle for desktop integration.
+- A tag-driven release workflow builds the Windows installer (Start-menu entry
+  and uninstaller) and portable zip, plus the Linux AppImage, in CI; writes
+  `SHA256SUMS.txt`; and publishes a GitHub Release.
+- Logs are also written to `data/logs/nomad.log` (rotating), and
+  `nomad diagnostics` prints a redacted support bundle — versions, non-secret
+  config and the log tail — for bug reports.
+- A one-time welcome tour explains "the world stays, the host changes" on first
+  launch, before the storage wizard.
+- An About box (F1) shows the version and license, with a one-click
+  **Copy diagnostics** button for support.
+- A system-tray icon (Show / Quit) with desktop notifications when hosting
+  starts and when the world is saved. It no-ops on desktops without a tray.
+- An indeterminate progress bar shows while the world starts or saves, and
+  hosting failures now raise an actionable dialog with a Copy-diagnostics button.
 - Guided storage wizard for the two supported backends: **Cloudflare R2** and
   **My own server** (an S3-compatible server you run yourself, such as Garage on
   a VPS or home box). It is a step-by-step flow with a **Test Connection** step
@@ -49,6 +72,22 @@ All notable changes to this project are documented here. The format follows
   the second packaging binary are gone, which removes the Windows
   `Nomad.exe`/`nomad.exe` name collision and the `nomad-cli` rename workaround,
   so the same command works on Windows, Linux and macOS.
+- Development gates: `ruff` (lint + format), `mypy` (typed core), and
+  `pytest-cov` with a coverage floor now run in CI, so style, types and coverage
+  cannot silently regress. The whole tree is ruff-formatted.
+- CI also runs a dependency audit (`pip-audit`), and Dependabot keeps the Python
+  and GitHub Actions dependencies current.
+- README gains **Download & install**, **Quickstart** and **Troubleshooting**
+  sections, and the Java note now reflects automatic provisioning.
+- The host agent runs a preflight (data directory writable, enough free disk)
+  before acquiring a lease, so a machine that cannot host fails fast with a
+  clear reason instead of pulling a world it cannot serve.
+- `nomad doctor` reports a provisioned Java runtime (or that Nomad will fetch
+  one on first host) instead of failing when the system has no Java.
+- The Minecraft server jar is fetched with the same resumable downloader, so an
+  interrupted download continues instead of starting over, with progress logged.
+- World pulls now stream straight to disk with progress, and the downloaded file
+  is verified against `world.sha256` (a mismatch removes the bad file).
 
 ### Fixed
 
@@ -56,6 +95,11 @@ All notable changes to this project are documented here. The format follows
   next host pull a world older than the copy still on disk; the lease is now
   preserved and allowed to expire, and the user is told their local copy is
   intact.
+- Ctrl-C while hosting (`nomad play`) now stops the server gracefully and still
+  uploads the world before releasing the lease. Previously the interrupt
+  unwound past the upload, so in-session changes were lost.
+- `NOMAD_LEASE_DURATION_SECONDS` is honored again: the configured lease duration
+  is threaded into `WorldStore` instead of being hardcoded to 300 seconds.
 
 ### Removed
 
@@ -89,6 +133,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Security
 
+- World archives are extracted under hard limits (entry count, total and
+  per-file uncompressed size) with symlink and hardlink rejection, so a hostile
+  or corrupt world cannot escape the run directory or fill the disk.
 - Credential fields are `SecretStr`, so they cannot be logged or repr'd by
   accident.
 - Global log-record redaction: URL userinfo, SigV4 `Authorization`, AWS key ids,

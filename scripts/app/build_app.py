@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,21 @@ _HIDDEN = [
     "launcher.storage",
     "launcher.storage.r2",
     "launcher.storage.server",
+    "launcher.tunnel",
+    "launcher.tunnel.none",
+    "launcher.tunnel.playit",
+    "launcher.download",
+    "launcher.archive",
+    "launcher.java",
+    "launcher.doctor",
+    "launcher.logs",
+    "launcher.diagnostics",
+    "launcher.resources",
+    "launcher.ui.app",
+    "launcher.ui.about",
+    "launcher.ui.onboarding",
+    "launcher.ui.tray",
+    "launcher.ui.errors",
     "launcher.ui.theme",
     "launcher.ui.dialogs",
     "launcher.ui.storage_wizard",
@@ -93,6 +109,7 @@ for pkg in ("PySide6", "shiboken6"):
     _COLLECT.setdefault(pkg, [])
 
 # --- helpers -------------------------------------------------------------
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
     print("+ " + " ".join(str(c) for c in cmd), flush=True)
@@ -157,11 +174,66 @@ def _pyi(name: str, script: Path, *, collect: bool = False) -> None:
             cmd += ["--collect-all", pkg]
     for mod in _HIDDEN:
         cmd += ["--hidden-import", mod]
+    assets = ROOT / "assets"
+    if assets.is_dir():
+        sep = ";" if _IS_WINDOWS else ":"
+        for asset in ("nomad.png", "nomad.ico"):
+            src = assets / asset
+            if src.exists():
+                cmd += ["--add-data", f"{src}{sep}assets"]
     icon = ROOT / "assets" / "nomad.ico"
     if icon.exists():
         cmd += ["--icon", str(icon)]
     cmd.append(str(script))
     _run(cmd)
+
+
+def _version() -> str:
+    """Read the single source of truth for the version (launcher/__init__.py)."""
+    text = (ROOT / "launcher" / "__init__.py").read_text(encoding="utf-8")
+    match = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+    return match.group(1) if match else "0.0.0"
+
+
+def desktop_entry(version: str, exec_name: str = "nomad") -> str:
+    """The Linux ``.desktop`` entry for the bundle (wrapped into an AppImage)."""
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Nomad\n"
+        "GenericName=Minecraft Server Hosting\n"
+        "Comment=Distributed Minecraft hosting over your own object storage\n"
+        f"Exec={exec_name} gui\n"
+        "Icon=nomad\n"
+        "Terminal=false\n"
+        "Categories=Game;Network;\n"
+        "Keywords=minecraft;server;hosting;\n"
+        f"X-Nomad-Version={version}\n"
+    )
+
+
+def write_desktop(bundle_dir: Path, version: str) -> None:
+    """Drop the ``.desktop`` file and icons into the bundle for desktop use."""
+    (bundle_dir / "Nomad.desktop").write_text(desktop_entry(version), encoding="utf-8")
+    for asset in ("nomad.png", "nomad.ico"):
+        src = ROOT / "assets" / asset
+        if src.exists():
+            shutil.copy2(src, bundle_dir / asset)
+
+
+def apprun_script() -> str:
+    """The ``AppRun`` entrypoint used inside the AppImage."""
+    return '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/nomad" gui "$@"\n'
+
+
+def write_appdir_extras(bundle_dir: Path) -> None:
+    """Make ``bundle_dir`` AppImage-ready: an ``AppRun`` and a ``.DirIcon``."""
+    apprun = bundle_dir / "AppRun"
+    apprun.write_text(apprun_script(), encoding="utf-8")
+    apprun.chmod(0o755)
+    icon = bundle_dir / "nomad.png"
+    if icon.exists():
+        shutil.copy2(icon, bundle_dir / ".DirIcon")
 
 
 def build_apps() -> None:
@@ -174,6 +246,87 @@ def build_apps() -> None:
 def assemble() -> None:
     (OUT / "java").mkdir(parents=True, exist_ok=True)
     (OUT / "data" / "logs").mkdir(parents=True, exist_ok=True)
+    write_desktop(OUT, _version())
+    if not _IS_WINDOWS:
+        write_appdir_extras(OUT)
+
+
+def make_appimage() -> Path | None:
+    """Wrap the bundle into an AppImage when ``appimagetool`` is available."""
+    tool = shutil.which("appimagetool")
+    if _IS_WINDOWS or tool is None:
+        return None
+    target = DIST / f"Nomad-{_version()}-x86_64.AppImage"
+    _run([tool, str(OUT), str(target)])
+    return target
+
+
+_NSI_TEMPLATE = r"""
+!define APP_NAME "Nomad"
+!define APP_VERSION "@VERSION@"
+!define SOURCE_DIR "@SOURCE@"
+!define OUT_FILE "@OUT@"
+
+Name "${APP_NAME}"
+OutFile "${OUT_FILE}"
+InstallDir "$PROGRAMFILES64\${APP_NAME}"
+RequestExecutionLevel admin
+SetCompressor /SOLID lzma
+
+Page directory
+Page instfiles
+UninstPage uninstConfirm
+UninstPage instfiles
+
+Section "Install"
+  SetOutPath "$INSTDIR"
+  File /r "${SOURCE_DIR}\*.*"
+  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\nomad.exe" "gui"
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\nomad.exe" "gui"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${APP_NAME}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" "$INSTDIR\Uninstall.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayIcon" "$INSTDIR\nomad.exe"
+SectionEnd
+
+Section "Uninstall"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  RMDir "$SMPROGRAMS\${APP_NAME}"
+  RMDir /r "$INSTDIR"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+SectionEnd
+"""
+
+
+def installer_script(
+    version: str, source_dir: Path | None = None, out_file: Path | None = None
+) -> str:
+    """The NSIS script for the Windows installer (Start-menu + uninstaller)."""
+    source = source_dir or OUT
+    out = out_file or (source.parent / f"Nomad-Setup-{version}.exe")
+    return (
+        _NSI_TEMPLATE.replace("@VERSION@", version)
+        .replace("@SOURCE@", str(source))
+        .replace("@OUT@", str(out))
+        .strip()
+        + "\n"
+    )
+
+
+def make_installer() -> Path | None:
+    """Build the Windows installer with ``makensis`` when it is available."""
+    tool = shutil.which("makensis")
+    if not _IS_WINDOWS or tool is None:
+        return None
+    WORK.mkdir(parents=True, exist_ok=True)
+    script = WORK / "nomad.nsi"
+    script.write_text(installer_script(_version()), encoding="utf-8")
+    _run([tool, str(script)])
+    target = DIST / f"Nomad-Setup-{_version()}.exe"
+    return target if target.exists() else None
 
 
 def main() -> int:
@@ -192,11 +345,24 @@ def main() -> int:
         _extract_java(OUT / "java")
     assemble()
 
-    size_mb = sum(
-        p.stat().st_size for p in OUT.rglob("*") if p.is_file()
-    ) // (1024 * 1024)
+    appimage = make_appimage()
+    if appimage is not None:
+        print(f"appimage ready at {appimage}", flush=True)
+    elif not _IS_WINDOWS:
+        print(f"appimagetool not found; AppImage-ready bundle is at {OUT}", flush=True)
+
+    installer = make_installer()
+    if installer is not None:
+        print(f"installer ready at {installer}", flush=True)
+    elif _IS_WINDOWS:
+        print("makensis not found; skipping the Windows installer", flush=True)
+
+    size_mb = sum(p.stat().st_size for p in OUT.rglob("*") if p.is_file()) // (1024 * 1024)
     print(f"\napp ready at {OUT} (~{size_mb} MB)", flush=True)
-    print("configure storage (env vars or data/settings.json), then run `nomad` or `nomad gui`.", flush=True)
+    print(
+        "configure storage (env vars or data/settings.json), then run `nomad` or `nomad gui`.",
+        flush=True,
+    )
     return 0
 
 

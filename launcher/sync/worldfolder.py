@@ -51,9 +51,7 @@ def _is_excluded(name: str) -> bool:
 
 def _is_minecraft_world(dir_path: Path) -> bool:
     """A real Minecraft save must contain level.dat (or its backup)."""
-    return (dir_path / _MC_LEVEL_DATA).is_file() or (
-        dir_path / _MC_LEVEL_DATA_OLD
-    ).is_file()
+    return (dir_path / _MC_LEVEL_DATA).is_file() or (dir_path / _MC_LEVEL_DATA_OLD).is_file()
 
 
 def _file_mtime(path: Path) -> float:
@@ -127,9 +125,7 @@ def reconcile_sources(
     """
     if cloud_snapshot_dir is not None:
         if not cloud_snapshot_dir.is_dir():
-            raise FileNotFoundError(
-                f"cloud snapshot directory not found: {cloud_snapshot_dir}"
-            )
+            raise FileNotFoundError(f"cloud snapshot directory not found: {cloud_snapshot_dir}")
         _copy_tree_merge(cloud_snapshot_dir, dest_dir)
     _copy_tree_merge(local_src_dir, dest_dir)
 

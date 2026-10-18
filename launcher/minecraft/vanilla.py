@@ -5,13 +5,13 @@ import logging
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 from urllib.request import urlopen
 
-from launcher.server_properties import ServerProperties
-
+from launcher.download import ProgressFn, download
 from launcher.minecraft.process import ProcessHandle
+from launcher.server_properties import ServerProperties
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,9 @@ eula={eula}
 
 
 class VanillaMinecraftRuntime:
+    def __init__(self, on_progress: ProgressFn | None = None) -> None:
+        self._on_progress = on_progress
+
     def install(self, version: str, dest: Path) -> Path:
         dest.mkdir(parents=True, exist_ok=True)
         jar_path = dest / "server.jar"
@@ -32,9 +35,7 @@ class VanillaMinecraftRuntime:
 
         server_url = self._resolve_server_url(version)
         logger.info("downloading server jar for %s from %s", version, server_url)
-        with urlopen(server_url) as response:
-            data = response.read()
-        jar_path.write_bytes(data)
+        download(server_url, jar_path, on_progress=self._on_progress)
         return jar_path
 
     def validate(self, install_dir: Path, java_path: str) -> tuple[bool, str]:

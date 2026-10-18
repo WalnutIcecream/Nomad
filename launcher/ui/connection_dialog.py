@@ -36,8 +36,7 @@ class ConnectionDialog(QDialog):
         root.setSpacing(10)
 
         intro = QLabel(
-            f"<b>{world.get('name', 'World')}</b> is hosted by "
-            f"{holder or 'another player'}."
+            f"<b>{world.get('name', 'World')}</b> is hosted by {holder or 'another player'}."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)

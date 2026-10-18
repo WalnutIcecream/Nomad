@@ -29,7 +29,9 @@ def _use_fake_keychain(monkeypatch, fake: _FakeKeyring) -> None:
     monkeypatch.setattr(credentials, "keychain_available", lambda: True)
     monkeypatch.setattr(credentials, "set_secret", lambda name, value: _fake_set(fake, name, value))
     monkeypatch.setattr(credentials, "get_secret", lambda name: fake.get_password("nomad", name))
-    monkeypatch.setattr(credentials, "delete_secret", lambda name: fake.delete_password("nomad", name))
+    monkeypatch.setattr(
+        credentials, "delete_secret", lambda name: fake.delete_password("nomad", name)
+    )
 
 
 def _fake_set(fake: _FakeKeyring, name: str, value: str) -> bool:

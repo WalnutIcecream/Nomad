@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 ui = [
     "PySide6>=6.7",
@@ -40,3 +43,33 @@ version = { attr = "launcher.__version__" }
 [tool.pytest.ini_options]
 testpaths = ["launcher/tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# Line width is the formatter's job; long string/URL literals are allowed.
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+files = ["launcher"]
+# Start lenient and ratchet: the GUI (PySide6) and the tests are out of scope
+# for type checking until the core is fully green.
+exclude = ["launcher/ui/", "launcher/tests/"]
+
+[[tool.mypy.overrides]]
+# The PySide6 GUI is not type-checked yet (stubs not installed); ratchet later.
+module = ["launcher.ui.*"]
+ignore_errors = true
+
+[tool.coverage.run]
+source = ["launcher"]
+omit = ["launcher/tests/*", "launcher/ui/*"]
+
+[tool.coverage.report]
+show_missing = true

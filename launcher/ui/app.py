@@ -12,9 +12,12 @@ from __future__ import annotations
 import logging
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from launcher.config import LauncherSettings, load_settings_file
+from launcher.logs import configure as configure_logs
+from launcher.resources import icon_path
 from launcher.secrets import install_log_redaction
 from launcher.ui import theme
 from launcher.ui.main_window import MainWindow
@@ -27,7 +30,11 @@ def run(argv: list[str] | None = None) -> int:
     install_log_redaction()  # basicConfig adds a handler after the first call
     app = QApplication(sys.argv if argv is None else argv)
     theme.apply_theme(app)
+    icon = icon_path()
+    if icon is not None:
+        app.setWindowIcon(QIcon(str(icon)))
     settings = load_settings_file(LauncherSettings())
+    configure_logs(settings)
     window = QMainWindow()
     window.setWindowTitle("Nomad")
     window.resize(720, 620)
